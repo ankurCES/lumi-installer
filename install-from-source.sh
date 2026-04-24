@@ -382,26 +382,73 @@ install_mac() {
   fi
   info "DMG: $(basename "$dmg") ($(du -h "$dmg" | awk '{print $1}'))"
 
+  # Parse hdiutil output via the tab-delimited final column so volume
+  # names with spaces (e.g. `/Volumes/Lumi 0.3.0-arm64`) survive
+  # intact. The previous regex `/Volumes/[^ ]+` truncated at the first
+  # space and pointed `cp` at a non-existent path.
+  local hdiutil_out
+  if ! hdiutil_out=$(hdiutil attach "$dmg" -nobrowse -noverify 2>&1); then
+    die "hdiutil attach failed: $hdiutil_out"
+  fi
   local mount_point
-  mount_point=$(hdiutil attach "$dmg" -nobrowse -noverify 2>/dev/null \
-    | grep -oE '/Volumes/[^ ]+(-arm64|-x64)?' | head -1)
-  if [[ -z "$mount_point" ]]; then
-    die "Failed to mount $dmg"
+  mount_point=$(printf '%s\n' "$hdiutil_out" \
+    | awk -F'\t' '/\/Volumes\// { n = NF; while (n > 1 && $n == "") n--; if ($n ~ /^\/Volumes\//) { print $n; exit } }' \
+    | sed -e 's/[[:space:]]*$//')
+  # Fallback — enumerate /Volumes/ and pick the newest Lumi* mount in
+  # case the awk parse misses (older hdiutil variants, stdout buffering).
+  if [[ -z "$mount_point" || ! -d "$mount_point" ]]; then
+    mount_point=$(ls -dt /Volumes/Lumi* 2>/dev/null | head -1)
+  fi
+  if [[ -z "$mount_point" || ! -d "$mount_point" ]]; then
+    die "Could not resolve mounted volume from hdiutil output: $hdiutil_out"
+  fi
+  info "Mounted at: $mount_point"
+
+  # Pick the .app inside the mount (usually Lumi.app, but stay resilient
+  # if electron-builder ever renames it).
+  local app_src
+  app_src=$(ls -d "${mount_point}"/*.app 2>/dev/null | head -1)
+  if [[ -z "$app_src" || ! -d "$app_src" ]]; then
+    hdiutil detach "$mount_point" -quiet 2>/dev/null || true
+    die "No .app bundle inside the mounted DMG"
   fi
 
-  if [[ -d /Applications/Lumi.app ]]; then
-    if ask_yes_no "Existing /Applications/Lumi.app found. Replace?" y; then
-      rm -rf /Applications/Lumi.app
+  # Pick install target. /Applications needs admin-group write perms
+  # (default on most macOS installs, locked down on some corporate ones).
+  local target_dir=/Applications
+  if [[ ! -w "$target_dir" ]]; then
+    warn "/Applications is not writable by this user"
+    if ask_yes_no "Install to ~/Applications instead?" y; then
+      target_dir="$HOME/Applications"
+      mkdir -p "$target_dir"
     else
-      hdiutil detach "$mount_point" -quiet || true
+      warn "Try rerunning with sudo to install to /Applications"
+      hdiutil detach "$mount_point" -quiet 2>/dev/null || true
       die "Install aborted"
     fi
   fi
 
-  cp -R "${mount_point}/Lumi.app" /Applications/ || die "Copy to /Applications failed"
-  xattr -d com.apple.quarantine /Applications/Lumi.app 2>/dev/null || true
-  hdiutil detach "$mount_point" -quiet || true
-  ok "Installed to /Applications/Lumi.app"
+  local app_name
+  app_name=$(basename "$app_src")
+  local target="${target_dir}/${app_name}"
+  if [[ -d "$target" ]]; then
+    if ask_yes_no "Existing ${target} found. Replace?" y; then
+      rm -rf "$target" 2>/dev/null || sudo rm -rf "$target" \
+        || { hdiutil detach "$mount_point" -quiet 2>/dev/null || true; die "Could not remove existing app"; }
+    else
+      hdiutil detach "$mount_point" -quiet 2>/dev/null || true
+      die "Install aborted"
+    fi
+  fi
+
+  if ! cp -R "$app_src" "$target_dir/" 2>/dev/null; then
+    warn "Plain cp failed — retrying with sudo"
+    sudo cp -R "$app_src" "$target_dir/" \
+      || { hdiutil detach "$mount_point" -quiet 2>/dev/null || true; die "Copy to $target_dir failed"; }
+  fi
+  xattr -d com.apple.quarantine "$target" 2>/dev/null || true
+  hdiutil detach "$mount_point" -quiet 2>/dev/null || true
+  ok "Installed to $target"
 }
 
 install_linux() {
