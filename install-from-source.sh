@@ -314,22 +314,44 @@ esac
 ok "Cloned to $WORK_DIR"
 
 # ─── Build ───────────────────────────────────────────────────────────────
-step "Installing engine + desktop dependencies"
+step "Installing workspace dependencies"
 
 cd "$WORK_DIR" || die "chdir failed"
 
-# Engine workspace (pnpm)
+# 1. Root pnpm workspace — installs + symlinks every `packages/*`
+#    EXCEPT `lumi-engine` (excluded via `pnpm-workspace.yaml`). This is
+#    what produces `node_modules/@lumi/{shared,config,engine-bridge,
+#    setup,…}` and the symlinks `apps/desktop`'s relative imports rely on
+#    (e.g. `gatewaySingleton.ts` → `packages/engine-bridge/dist/index.js`).
+info "pnpm install (root workspace)"
+(pnpm install --frozen-lockfile 2>&1 | tail -5) \
+  || die "Root pnpm install failed"
+ok "Root workspace deps installed"
+
+# 2. Lumi engine — its own isolated workspace because of the grafted
+#    upstream dep graph.
 if [[ -f packages/lumi-engine/package.json ]]; then
   info "pnpm install for lumi-engine"
   (cd packages/lumi-engine && pnpm install --frozen-lockfile 2>&1 | tail -5) \
-    || die "pnpm install failed"
+    || die "Engine pnpm install failed"
   ok "lumi-engine deps installed"
 fi
 
+# 3. Desktop app — separate bun lockfile. Not part of the pnpm workspace
+#    (Electron native modules + a very different dep graph).
 info "bun install for desktop"
 (cd apps/desktop && bun install 2>&1 | tail -5) \
-  || die "bun install failed"
+  || die "Desktop bun install failed"
 ok "Desktop deps installed"
+
+step "Building workspace packages"
+# 4. Build every `@lumi/*` package the desktop imports from (shared,
+#    config, engine-bridge, setup — all `tsc -b`). Recursive `-r` walks
+#    the workspace dep graph in topological order.
+info "pnpm -r build (shared / config / engine-bridge / setup …)"
+(pnpm -r build 2>&1 | tail -10) \
+  || die "Workspace package builds failed"
+ok "Workspace packages built"
 
 step "Building the Lumi engine"
 (cd packages/lumi-engine && pnpm run build 2>&1 | tail -5) \

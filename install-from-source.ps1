@@ -284,27 +284,49 @@ try {
   Write-Ok "Cloned to $WorkDir"
 
   # ─── Build ─────────────────────────────────────────────────────────────
-  Write-Step "Installing engine + desktop dependencies"
+  Write-Step "Installing workspace dependencies"
 
   Push-Location $WorkDir
   try {
+    # 1. Root pnpm workspace — installs + symlinks every `packages/*`
+    #    EXCEPT `lumi-engine` (excluded via `pnpm-workspace.yaml`). This
+    #    is what produces `node_modules\@lumi\{shared,config,
+    #    engine-bridge,setup,…}` and the symlinks the desktop's
+    #    relative imports rely on (e.g. gatewaySingleton.ts →
+    #    packages\engine-bridge\dist\index.js).
+    Write-Info "pnpm install (root workspace)"
+    pnpm install --frozen-lockfile
+    if ($LASTEXITCODE -ne 0) { Die "Root pnpm install failed" }
+    Write-Ok "Root workspace deps installed"
+
+    # 2. Lumi engine — separate workspace (grafted upstream dep graph).
     if (Test-Path 'packages\lumi-engine\package.json') {
       Write-Info "pnpm install for lumi-engine"
       Push-Location 'packages\lumi-engine'
       try {
         pnpm install --frozen-lockfile
-        if ($LASTEXITCODE -ne 0) { Die "pnpm install failed" }
+        if ($LASTEXITCODE -ne 0) { Die "Engine pnpm install failed" }
       } finally { Pop-Location }
       Write-Ok "lumi-engine deps installed"
     }
 
+    # 3. Desktop app — separate bun lockfile.
     Write-Info "bun install for desktop"
     Push-Location 'apps\desktop'
     try {
       bun install
-      if ($LASTEXITCODE -ne 0) { Die "bun install failed" }
+      if ($LASTEXITCODE -ne 0) { Die "Desktop bun install failed" }
     } finally { Pop-Location }
     Write-Ok "Desktop deps installed"
+
+    Write-Step "Building workspace packages"
+    # 4. Build every `@lumi/*` root workspace package (shared, config,
+    #    engine-bridge, setup — all `tsc -b`). `pnpm -r build` walks the
+    #    workspace dep graph in topological order.
+    Write-Info "pnpm -r build (shared / config / engine-bridge / setup …)"
+    pnpm -r build
+    if ($LASTEXITCODE -ne 0) { Die "Workspace package builds failed" }
+    Write-Ok "Workspace packages built"
 
     Write-Step "Building the Lumi engine"
     Push-Location 'packages\lumi-engine'
