@@ -89,6 +89,15 @@ ask_yes_no() {
   [[ "$ans" =~ ^[Yy] ]]
 }
 
+# ─── Clear screen ────────────────────────────────────────────────────────
+# Drop whatever was on the user's terminal before — install output gets a
+# clean stage. Skipped when stdout isn't a TTY (e.g. CI logs, file
+# redirects) since the escape would otherwise leak into the captured
+# output.
+if [[ -t 1 ]]; then
+  printf '\033[2J\033[H'
+fi
+
 # ─── Banner ──────────────────────────────────────────────────────────────
 # Two-tone moon + LUMI block art, matching the engine CLI banner
 # (`packages/lumi-engine/src/cli/banner.ts`) so the installer looks like
@@ -486,6 +495,52 @@ case "$PLATFORM" in
   mac)   install_mac ;;
   linux) install_linux ;;
 esac
+
+# ─── Auto-launch the freshly-installed app ──────────────────────────────
+# The in-app "Install Update" flow quits Lumi before invoking this
+# script and expects it to bring the new version up automatically —
+# otherwise the user is left staring at a closed app wondering whether
+# the update worked. For curl-pipe-bash users on a desktop session this
+# is just a friendly UX touch; on headless installs (no display server,
+# CI runs) the launch silently fails and the script still exits clean.
+#
+# Set NO_LAUNCH=1 (or pass --no-launch) to opt out — useful when
+# scripting installs that shouldn't trigger a GUI window.
+launch_lumi_app() {
+  if [[ "${NO_LAUNCH:-0}" == "1" ]]; then
+    return 0
+  fi
+
+  case "$PLATFORM" in
+    mac)
+      # `open -n -a` boots a fresh instance even when one is already
+      # running. We try the install destination first (which depends on
+      # whether /Applications was writable above) so we always relaunch
+      # the version we just installed, not a stale older copy that
+      # might still be sitting in the other location.
+      local candidate
+      for candidate in "/Applications/Lumi.app" "$HOME/Applications/Lumi.app"; do
+        if [[ -d "$candidate" ]]; then
+          info "launching $candidate..."
+          open -n -a "$candidate" 2>/dev/null && return 0
+        fi
+      done
+      ;;
+    linux)
+      local lumi_bin
+      for lumi_bin in lumi Lumi; do
+        if command -v "$lumi_bin" >/dev/null 2>&1; then
+          info "launching $lumi_bin..."
+          nohup "$lumi_bin" >/dev/null 2>&1 &
+          disown
+          return 0
+        fi
+      done
+      ;;
+  esac
+}
+
+launch_lumi_app
 
 # ─── Final banner ────────────────────────────────────────────────────────
 printf '\n%s              🌙  Lumi is ready.%s\n\n' "${BOLD}${GREEN}" "${RESET}"
