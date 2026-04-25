@@ -74,7 +74,33 @@ step "Checking build-tool prerequisites"
 # when missing; bun installer drops into ~/.bun/bin.
 if ! command -v bun >/dev/null 2>&1; then
   warn "bun not found — installing"
-  curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1 || die "bun install failed; see https://bun.sh/"
+  # The bun installer needs `unzip` on Linux to extract the binary —
+  # an upstream regression report I hit was "bun install failed" with
+  # no useful detail because the bash bootstrap had silenced stderr.
+  # Pre-flight unzip and pass through both streams so the user sees
+  # the real error if the install dies for any other reason (network,
+  # disk space, permissions).
+  if [[ "$PLATFORM" == "linux" ]] && ! command -v unzip >/dev/null 2>&1; then
+    warn "unzip not found — bun installer needs it"
+    if command -v apt-get >/dev/null 2>&1; then
+      info "installing unzip via apt-get (may prompt for sudo)"
+      sudo apt-get install -y unzip || die "unzip install failed; install it manually and rerun"
+    elif command -v dnf >/dev/null 2>&1; then
+      sudo dnf install -y unzip || die "unzip install failed; install it manually and rerun"
+    elif command -v yum >/dev/null 2>&1; then
+      sudo yum install -y unzip || die "unzip install failed; install it manually and rerun"
+    else
+      die "Please install 'unzip' (your distro's package manager) and rerun"
+    fi
+  fi
+  # Pipe stdout to /dev/null to keep the bootstrap output clean, but
+  # let stderr through — that's where bun's installer actually reports
+  # network / 404 / extraction failures. The previous version silenced
+  # both streams and surfaced a useless "bun install failed" with no
+  # diagnostic detail (the regression that prompted this fix).
+  if ! curl -fsSL https://bun.sh/install | bash >/dev/null; then
+    die "bun install failed. See messages above and https://bun.sh/ for manual install."
+  fi
   if [[ -d "$HOME/.bun/bin" ]]; then
     export PATH="$HOME/.bun/bin:$PATH"
   fi

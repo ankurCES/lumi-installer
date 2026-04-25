@@ -60,7 +60,10 @@ if (-not (Has-Command 'bun')) {
   try {
     Invoke-RestMethod 'https://bun.sh/install.ps1' | Invoke-Expression
   } catch {
-    Die "bun install failed; see https://bun.sh/"
+    # Surface the upstream exception detail — the previous catch
+    # block swallowed it and emitted only "bun install failed", which
+    # gave the user nothing useful to act on.
+    Die "bun install failed: $($_.Exception.Message). See https://bun.sh/ for manual install."
   }
   $bunBin = Join-Path $env:USERPROFILE '.bun\bin'
   if (Test-Path $bunBin) {
