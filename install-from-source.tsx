@@ -284,7 +284,18 @@ const App: React.FC = () => {
       .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
         dispatch({ type: 'fail', error: msg });
-        setTimeout(() => exit(new Error(msg)), 1500);
+        // Hold the error screen long enough for the user to read the
+        // failure context, then dump the same context to actual
+        // stderr so it survives Ink unmounting the rendered tree on
+        // exit. The error message itself already includes recent
+        // stderr / stdout from the failed subprocess (embedded by
+        // execStream's reject path), so a single write is enough.
+        setTimeout(() => {
+          process.stderr.write('\n──── Lumi installer failure ────\n');
+          process.stderr.write(`${msg}\n`);
+          process.stderr.write(`\nBuild dir kept at ${WORK_DIR} for debugging.\n\n`);
+          exit(new Error(msg));
+        }, 5000);
       });
   }, [state.step]);
 
@@ -683,17 +694,43 @@ const DoneScreen: React.FC<{ state: State }> = ({ state }) => (
   </Box>
 );
 
-const ErrorScreen: React.FC<{ state: State }> = ({ state }) => (
-  <Box flexDirection='column' marginTop={1}>
-    <Text color='red' bold>
-      Install failed.
-    </Text>
-    <Text color='red'>{state.error ?? 'Unknown error'}</Text>
-    <Text dimColor>
-      Re-run with --yes to skip prompts, or set SKIP_CLEANUP=1 to keep the build dir for debugging.
-    </Text>
-  </Box>
-);
+const ErrorScreen: React.FC<{ state: State }> = ({ state }) => {
+  // Surface the last warn/error entries — that's the actual
+  // subprocess stderr (pnpm install output, build errors, etc.).
+  // The truncated log tail in ProgressView gets cleared the moment
+  // the screen scrolls, so dropping them here at full width gives
+  // the user something they can actually act on.
+  const failureContext = state.logs
+    .filter((e) => e.level === 'warn' || e.level === 'error' || e.level === 'cmd')
+    .slice(-25);
+  return (
+    <Box flexDirection='column' marginTop={1}>
+      <Text color='red' bold>
+        Install failed.
+      </Text>
+      <Text color='red'>{state.error ?? 'Unknown error'}</Text>
+      {failureContext.length > 0 && (
+        <Box flexDirection='column' marginTop={1}>
+          <Text dimColor>Last subprocess output (most recent):</Text>
+          {failureContext.map((entry, idx) => (
+            <Text
+              key={`fail-${entry.ts}-${idx}`}
+              color={entry.level === 'error' ? 'red' : entry.level === 'cmd' ? 'magenta' : 'yellow'}
+            >
+              {entry.message}
+            </Text>
+          ))}
+        </Box>
+      )}
+      <Box marginTop={1} flexDirection='column'>
+        <Text dimColor>
+          The build dir was kept for debugging — see logs above. Re-run after fixing the underlying issue, or pass --yes
+          to skip prompts.
+        </Text>
+      </Box>
+    </Box>
+  );
+};
 
 // ── Auth detection ─────────────────────────────────────────────────────────
 
@@ -831,7 +868,12 @@ async function runInstall(state: State, dispatch: React.Dispatch<Action>): Promi
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log('error', msg);
-    cleanupWorkdir(log);
+    // KEEP the workdir on failure — the user almost always needs to
+    // poke around in there to figure out what broke (cd <workdir> &&
+    // pnpm install --reporter=ndjson, etc.). Skip cleanupWorkdir
+    // here; the bash bootstrap's SKIP_CLEANUP env var still applies
+    // for the success path.
+    log('info', `Build dir kept at ${WORK_DIR} for debugging`);
     throw new Error(msg);
   }
 }
@@ -1125,11 +1167,45 @@ async function execStream(
       stdio: ['ignore', 'pipe', 'pipe'],
       env: process.env,
     });
-    streamLines(child.stdout, (line) => log('info', truncate(line)));
-    streamLines(child.stderr, (line) => log('warn', truncate(line)));
+    // Don't truncate stderr — the actual error message (pnpm install
+    // failed because of … / npm registry 502 / etc.) is the whole
+    // point of streaming it. Truncate stdout aggressively since it's
+    // the noisy progress bars we don't need persisted.
+    //
+    // Buffer the most recent stderr lines so we can embed them in
+    // the rejected Error. The previous version surfaced just the
+    // exit code ("pnpm exited with code 1") with no context — the
+    // user reported being unable to debug an actual install failure.
+    const recentStderr: string[] = [];
+    const recentStdoutTail: string[] = [];
+    streamLines(child.stdout, (line) => {
+      log('info', truncate(line, 110));
+      recentStdoutTail.push(line);
+      if (recentStdoutTail.length > 8) recentStdoutTail.shift();
+    });
+    streamLines(child.stderr, (line) => {
+      log('warn', truncate(line, 240));
+      recentStderr.push(line);
+      if (recentStderr.length > 40) recentStderr.shift();
+    });
     child.on('exit', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`${cmd} exited with code ${code}`));
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const lines: string[] = [];
+      lines.push(`${cmd} exited with code ${code}`);
+      if (recentStderr.length > 0) {
+        lines.push('--- recent stderr ---');
+        lines.push(...recentStderr);
+      } else if (recentStdoutTail.length > 0) {
+        // Some tools (looking at you, pnpm) emit failure detail to
+        // stdout instead of stderr. Fall back to the stdout tail
+        // when stderr was empty.
+        lines.push('--- recent stdout ---');
+        lines.push(...recentStdoutTail);
+      }
+      reject(new Error(lines.join('\n')));
     });
     child.on('error', reject);
   });
@@ -1151,8 +1227,7 @@ function streamLines(stream: NodeJS.ReadableStream | null, onLine: (line: string
   });
 }
 
-function truncate(line: string): string {
-  const max = 110;
+function truncate(line: string, max = 110): string {
   return line.length <= max ? line : `${line.slice(0, max - 1)}…`;
 }
 
