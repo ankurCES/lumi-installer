@@ -211,6 +211,22 @@ echo
 
 # ─── Hand off to Ink installer ────────────────────────────────────────────
 # The TSX takes over from here. Args + env vars flow through unchanged.
+#
+# stdin redirect: when this script is invoked via `curl … | bash`, the
+# pipe IS the bash process's stdin — and that pipe inherits down to
+# the bun child, which crashes Ink with
+#   "Raw mode is not supported on the current process.stdin"
+# the moment any <SelectInput> or <TextInput> mounts. Reassigning the
+# child's stdin to /dev/tty (the controlling terminal) gives Ink a
+# real TTY for raw-mode keystroke capture, which is what the menu /
+# auth picker / PAT prompt all need. If /dev/tty isn't available
+# (CI, headless, no controlling terminal) we fall through to the
+# inherited pipe — the TSX detects the non-TTY case and forces
+# non-interactive mode rather than throwing.
 cd "$WORK"
-bun install-from-source.tsx "$@"
+if [[ -e /dev/tty ]]; then
+  bun install-from-source.tsx "$@" </dev/tty
+else
+  bun install-from-source.tsx "$@"
+fi
 exit $?

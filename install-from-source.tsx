@@ -49,9 +49,22 @@ const REPO = process.env.REPO ?? 'ankurCES/OpenLaude';
 const BRANCH = process.env.BRANCH ?? 'main';
 const WORK_DIR = process.env.WORK_DIR ?? path.join(tmpdir(), `lumi-build-${process.pid}`);
 const ENV_TOKEN = (process.env.GITHUB_TOKEN ?? '').trim();
+/**
+ * Force non-interactive when:
+ *   1. The user passed --yes / -y / set LUMI_INSTALL_YES=1, OR
+ *   2. process.stdin isn't a TTY — Ink's <SelectInput> / <TextInput>
+ *      use raw mode which requires a real TTY. The bash bootstrap
+ *      already redirects stdin from /dev/tty when one's available
+ *      (so curl-pipe-bash works); this guard catches the truly
+ *      headless case (CI, container without /dev/tty, ssh -T) where
+ *      no TTY exists at all and the alternative is an Ink crash.
+ */
+const STDIN_IS_TTY = Boolean(process.stdin && process.stdin.isTTY);
 const NON_INTERACTIVE = (() => {
   if (process.env.LUMI_INSTALL_YES === '1') return true;
-  return process.argv.slice(2).some((a) => a === '--yes' || a === '-y');
+  if (process.argv.slice(2).some((a) => a === '--yes' || a === '-y')) return true;
+  if (!STDIN_IS_TTY) return true;
+  return false;
 })();
 
 // ── Type definitions ───────────────────────────────────────────────────────
@@ -184,6 +197,12 @@ const App: React.FC = () => {
   // doesn't have access to the repo (`gh repo view` fails),
   // ghAuthOk stays false, the picker hides the gh option entirely,
   // and the user is steered to the PAT flow (the user's spec).
+  //
+  // Non-interactive path skips the menu + picker entirely: even
+  // briefly mounting <SelectInput>/<TextInput> trips Ink's raw-mode
+  // requirement (which needs a TTY). Defaults: installType=update,
+  // authMethod=detected. If no auth was detected and we're non-
+  // interactive, fail explicitly rather than hanging.
   useEffect(() => {
     void (async () => {
       const detection = await detectAuth();
@@ -195,7 +214,22 @@ const App: React.FC = () => {
         ghAuthOk: detection.ghAuthOk,
         sshOk: detection.sshOk,
       });
+
+      if (NON_INTERACTIVE) {
+        if (!detection.method) {
+          dispatch({
+            type: 'fail',
+            error: STDIN_IS_TTY
+              ? 'No GitHub auth detected and --yes / non-interactive mode does not allow PAT prompt. Set GITHUB_TOKEN, sign in to gh CLI, or omit --yes.'
+              : 'stdin is not a TTY and no GitHub auth detected. Set GITHUB_TOKEN or sign in to gh CLI before piping this script through bash.',
+          });
+          return;
+        }
+        dispatch({ type: 'set-install-type', value: 'update' });
+        dispatch({ type: 'set-step', value: 'running' });
+      }
     })();
+    if (NON_INTERACTIVE) return; // skip the splash → menu transition
     const t = setTimeout(() => {
       dispatch({ type: 'set-step', value: 'menu' });
     }, 1700);
@@ -219,26 +253,6 @@ const App: React.FC = () => {
         setTimeout(() => exit(new Error(msg)), 1500);
       });
   }, [state.step]);
-
-  // Non-interactive: auto-pick install type = update + auto-confirm auth.
-  // If non-interactive AND no auth was detected (gh signed in but lacks
-  // access, no env token, no ssh) we fail explicitly rather than hang
-  // on the PAT prompt — matches the bash --yes behaviour.
-  useEffect(() => {
-    if (!NON_INTERACTIVE) return;
-    if (state.step === 'menu' && state.installType == null) {
-      dispatch({ type: 'set-install-type', value: 'update' });
-    }
-    if (state.step === 'menu' && state.installType != null) {
-      dispatch({ type: 'set-step', value: 'auth-picker' });
-    }
-    if (state.step === 'auth-picker' && state.detectedAuth) {
-      dispatch({ type: 'set-step', value: 'running' });
-    }
-    if (state.step === 'auth-picker' && !state.detectedAuth) {
-      dispatch({ type: 'fail', error: 'No GitHub auth detected and --yes / non-interactive mode does not allow PAT prompt.' });
-    }
-  }, [state.step, state.installType, state.detectedAuth]);
 
   return (
     <Box flexDirection='column' paddingX={1}>
