@@ -469,32 +469,46 @@ const TaglineTypewriter: React.FC = () => {
  * guid/components/Moonrunner.tsx, `drawMoon` at line 303). The
  * DOM/canvas version draws a crescent body via radial gradient + a
  * sky-coloured "bite" overlay + stick-figure limbs; in a terminal we
- * approximate it with a parenthesised crescent face `(`/`)` + a single
- * eye dot, plus a 2-frame stick-limb run cycle.
+ * approximate it with a parenthesised crescent face + a single eye
+ * dot, plus a 2-frame stick-limb run cycle and multi-row obstacle
+ * sprites.
  *
- * Layout (full terminal width via useStdout):
- *   Row 0: twinkling stars (sky)
- *   Row 1: moon top crescent — shifts up while jumping
- *   Row 2: moon body
- *   Row 3: moon arms + bird obstacles (high-altitude)
- *   Row 4: moon legs + cactus obstacles (ground-level)
- *   Row 5: ground line ─────────
+ * Visual style was inspired by the open-source Term-Rex
+ * (https://github.com/jianongHe/Term-Rex, MIT © 2025 Jianong He) — a
+ * keyboard-controlled chrome-dino game in the terminal. We borrow the
+ * "static character on the left, multi-row obstacles scrolling in
+ * from the right" framing only; the actual ASCII sprites here are
+ * original (designed to fit Lumi's moonglow palette + the existing
+ * yellow-on-navy theme), and this is an auto-running animation, not
+ * a game (no input handling).
+ *
+ * Layout (capped scene width via SCENE_MAX_COLS):
+ *   Row 0: drifting cloud silhouettes (parallax)
+ *   Row 1: twinkling stars + high birds
+ *   Row 2: low birds + jumping-moon top
+ *   Row 3: moon top (grounded) / cactus tip
+ *   Row 4: moon body / cactus body
+ *   Row 5: moon arms / cactus body
+ *   Row 6: moon legs / cactus base
+ *   Row 7: ground line ─────────
  *
  * Obstacles spawn off the right edge and scroll left at one column
- * per tick. When the nearest cactus is within JUMP_LEAD columns of
- * the moon, the moon jumps — its sprite shifts up by 2 rows for the
- * duration of the obstacle's pass, mirroring the canvas Moonrunner's
- * jump arc semantics.
+ * per tick. When a cactus enters JUMP_LEAD columns of the moon, the
+ * moon jumps — sprite shifts up by 2 rows for JUMP_DURATION ticks,
+ * mirroring the canvas Moonrunner's jump-arc semantics.
  */
 const MOON_TICK_MS = 110;
 /** Where the moon's left edge sits in the row, fixed across the run. */
 const MOON_FIXED_X = 6;
 /** Distance (in cols) at which the moon decides to jump over an upcoming cactus. */
-const JUMP_LEAD = 6;
+const JUMP_LEAD = 8;
 /** How long (in ticks) the moon stays elevated once committed to a jump. */
-const JUMP_DURATION = 6;
+const JUMP_DURATION = 7;
+/** How wide the scene gets capped at — keeps the animation readable on
+ *  a 200-col window without sprawling edge-to-edge. */
+const SCENE_MAX_COLS = 80;
 
-type ObstacleKind = 'cactus' | 'bird';
+type ObstacleKind = 'cactus-small' | 'cactus-tall' | 'bird-low' | 'bird-high';
 interface Obstacle {
   kind: ObstacleKind;
   x: number;
@@ -502,16 +516,70 @@ interface Obstacle {
   spawnedAt: number;
 }
 
-/** How wide the scene gets capped at when the terminal is wider — keeps
- *  the moon-runner readable without sprawling across a 200-col window. */
-const SCENE_MAX_COLS = 80;
+interface Cloud {
+  x: number;
+  spawnedAt: number;
+}
+
+/**
+ * Original ASCII sprites — multi-row strings indexed by [row][col].
+ * Spaces are treated as transparent during the stamp pass so sprites
+ * with a non-rectangular silhouette don't blank out the cells behind
+ * them. Designed to read against the lumi-dark sky on a TTY without
+ * relying on color (color is layered on at render time).
+ */
+const SPRITES = {
+  // Cactus: small (3 rows) and tall (4 rows) variants.
+  cactusSmall: [
+    ' │ ',
+    '─┼─',
+    ' │ ',
+  ],
+  cactusTall: [
+    ' │ ',
+    '─┼ ',
+    ' │─',
+    ' │ ',
+  ],
+  // Bird: 2-frame wing flap. Wings up = beat-1, wings down = beat-2.
+  // Both frames keep the body anchor point identical so the silhouette
+  // doesn't jitter vertically across the flap.
+  birdWingsUp: [
+    ' ╲   ',
+    '  ●━━',
+    ' ╱   ',
+  ],
+  birdWingsDown: [
+    ' ╱   ',
+    '  ●━━',
+    ' ╲   ',
+  ],
+  // Cloud: 2 rows of soft scribble — visible against navy without
+  // being loud enough to compete with the moon.
+  cloud: [
+    ' ╭───╮ ',
+    '╰─────╯',
+  ],
+};
+
+/** Stamp a multi-row sprite onto the row buffer with space-transparency. */
+function stampSprite(rows: string[][], sprite: string[], baseRow: number, baseCol: number, cols: number): void {
+  for (let r = 0; r < sprite.length; r++) {
+    const targetRow = baseRow + r;
+    if (targetRow < 0 || targetRow >= rows.length) continue;
+    const text = sprite[r];
+    for (let c = 0; c < text.length; c++) {
+      const x = baseCol + c;
+      if (x < 0 || x >= cols) continue;
+      const ch = text[c];
+      if (ch !== ' ') rows[targetRow][x] = ch;
+    }
+  }
+}
 
 const MoonRunner: React.FC = () => {
   const { stdout } = useStdout();
   const termCols = stdout?.columns ?? 80;
-  // Scene width: bounded so the centered animation has stable
-  // proportions across narrow / wide terminals. Don't exceed the
-  // actual terminal, don't go below 50.
   const cols = Math.max(50, Math.min(termCols - 4, SCENE_MAX_COLS));
   const [tick, setTick] = useState(0);
 
@@ -520,116 +588,133 @@ const MoonRunner: React.FC = () => {
     return () => clearInterval(id);
   }, []);
 
-  // Spawn obstacles off the right edge at irregular intervals so the
-  // pattern doesn't feel mechanical. Birds are rarer than cacti.
+  // Obstacles: cactus + bird, spawned off the right edge at irregular
+  // intervals. Mix of altitudes so the moon has to alternate jumping
+  // vs. running-under (high birds clear the moon's head).
   const obstacles = useMemo<Obstacle[]>(() => {
     const result: Obstacle[] = [];
-    // Walk back through recent spawn ticks; an obstacle spawned at
-    // tick T is at column (cols - 1 - (tick - T)). Past the left edge?
-    // Drop it.
-    const SPAWN_STRIDE = 14;
+    const SPAWN_STRIDE = 16;
     for (let spawnedAt = tick; spawnedAt >= 0; spawnedAt -= 1) {
-      // Spawn on cadence ticks (every SPAWN_STRIDE), with some jitter.
       const phase = spawnedAt % SPAWN_STRIDE;
       const isSpawnTick = phase === 0 || phase === Math.floor(SPAWN_STRIDE * 0.6);
       if (!isSpawnTick) continue;
       const x = cols - 1 - (tick - spawnedAt);
-      if (x < 0) break; // off the left edge — earlier spawns are also gone
-      // Bird every 3rd spawn slot, cactus otherwise. Birds fly high so
-      // they pass over the moon when it's grounded; cacti are
-      // ground-level and require a jump.
-      const kind: ObstacleKind = (spawnedAt / SPAWN_STRIDE) % 3 === 0 ? 'bird' : 'cactus';
+      if (x < -8) break;
+      const slot = Math.floor(spawnedAt / SPAWN_STRIDE);
+      // 4-way rotation through the slot index keeps the pattern from
+      // feeling mechanical without drifting the deterministic seed.
+      const kind: ObstacleKind =
+        slot % 4 === 0
+          ? 'cactus-small'
+          : slot % 4 === 1
+            ? 'bird-low'
+            : slot % 4 === 2
+              ? 'cactus-tall'
+              : 'bird-high';
       result.push({ kind, x, spawnedAt });
     }
     return result;
   }, [tick, cols]);
 
-  // Decide if the moon should be jumping this tick — "yes" if any
-  // cactus is between MOON_FIXED_X and MOON_FIXED_X + JUMP_LEAD. Hold
-  // the jump for JUMP_DURATION ticks so the silhouette has a visible
-  // arc instead of a one-frame blip.
-  const jumping = obstacles.some(
+  // Clouds drift slower than obstacles (parallax). Spawn less often.
+  const clouds = useMemo<Cloud[]>(() => {
+    const result: Cloud[] = [];
+    const STRIDE = 40;
+    for (let spawnedAt = tick; spawnedAt >= 0; spawnedAt -= 1) {
+      if (spawnedAt % STRIDE !== 0) continue;
+      // 0.5x scroll = 1 col every 2 ticks
+      const x = cols - 1 - Math.floor((tick - spawnedAt) / 2);
+      if (x < -10) break;
+      result.push({ x, spawnedAt });
+    }
+    return result;
+  }, [tick, cols]);
+
+  // Jump trigger: any ground-level cactus inside JUMP_LEAD of the moon.
+  const incomingCactus = obstacles.some(
     (o) =>
-      o.kind === 'cactus' && o.x >= MOON_FIXED_X - 1 && o.x <= MOON_FIXED_X + JUMP_LEAD,
+      (o.kind === 'cactus-small' || o.kind === 'cactus-tall') &&
+      o.x >= MOON_FIXED_X - 1 &&
+      o.x <= MOON_FIXED_X + JUMP_LEAD,
   );
-  // Persist a jump for a few ticks once committed — track via a ref so
-  // we don't oscillate when the cactus is right under the moon.
   const jumpUntilRef = useRef(0);
-  if (jumping) {
+  if (incomingCactus) {
     jumpUntilRef.current = Math.max(jumpUntilRef.current, tick + JUMP_DURATION);
   }
   const isElevated = tick < jumpUntilRef.current;
-  const moonYOffset = isElevated ? 2 : 0; // shift sprite up by 2 rows during jump
+  const moonYOffset = isElevated ? 2 : 0;
 
-  // Build the rows from a column buffer so moon + obstacles + stars
-  // can coexist on the same line without z-order headaches.
-  const ROWS = 6;
+  // Render buffer.
+  const ROWS = 8;
+  const GROUND_ROW = 7; // ground line
+  const MOON_LEG_ROW = 6; // moon's legs land here when grounded
   const rows: string[][] = Array.from({ length: ROWS }, () => new Array(cols).fill(' '));
 
-  // Sky stars (row 0).
-  const starPositions = [3, 11, 19, 27, 35, 43, 51, 59, 67, 75, 83, 91, 99];
+  // Stars (row 1 — sky, just below the cloud band).
+  const starPositions = [3, 11, 19, 27, 35, 43, 51, 59, 67, 75, 83];
   const starGlyphs = ['·', '✦', '✧', '·', '✦', '·'];
   for (let i = 0; i < starPositions.length; i++) {
     const x = starPositions[i];
     if (x >= cols) break;
-    if ((tick + i * 5) % 13 < 7) rows[0][x] = starGlyphs[i % starGlyphs.length];
+    if ((tick + i * 5) % 13 < 7) rows[1][x] = starGlyphs[i % starGlyphs.length];
   }
 
-  // Moon sprite — 4 rows tall: top crescent, body, arms, legs. The
-  // grounded baseline puts legs on row 4 (just above ground row 5).
-  // When elevated, every row shifts up by `moonYOffset`.
+  // Clouds at the very top — drifts at half speed.
+  for (const cloud of clouds) {
+    stampSprite(rows, SPRITES.cloud, 0, cloud.x, cols);
+  }
+
+  // Obstacles.
+  for (const o of obstacles) {
+    if (o.kind === 'cactus-small') {
+      // Small cactus: 3 rows tall, base on row 6 (alongside moon legs).
+      stampSprite(rows, SPRITES.cactusSmall, 4, o.x, cols);
+    } else if (o.kind === 'cactus-tall') {
+      // Tall cactus: 4 rows, top reaches into moon's body row.
+      stampSprite(rows, SPRITES.cactusTall, 3, o.x, cols);
+    } else {
+      // Bird: 3 rows; low birds at row 4 (head-height when moon is
+      // grounded → must jump under), high birds at row 2 (clear above
+      // the moon → don't trigger jumps).
+      const wingFrame = tick % 2 === 0 ? SPRITES.birdWingsUp : SPRITES.birdWingsDown;
+      const baseRow = o.kind === 'bird-low' ? 4 : 2;
+      stampSprite(rows, wingFrame, baseRow, o.x, cols);
+    }
+  }
+
+  // Moon sprite — 4 rows tall: top crescent, body, arms, legs.
+  // Yellow crescent body (`(o)` reads as a curved face with one eye)
+  // + stick limbs. Legs land on MOON_LEG_ROW by default; jump shifts
+  // every row up by `moonYOffset`.
   const runFrame = Math.floor(tick / 2) % 2;
   const moonRows = [
-    ' __ ', // top crescent — open paren + concave top
-    '( o)', // body — single eye dot, crescent face
-    runFrame === 0 ? ' /|\\' : ' \\|/', // arms swap each tick
-    runFrame === 0 ? ' / \\' : ' \\ /', // legs swap each tick
+    ' __ ',
+    '(o )',
+    runFrame === 0 ? ' /|\\' : ' \\|/',
+    runFrame === 0 ? ' / \\' : ' \\ /',
   ];
-  for (let r = 0; r < moonRows.length; r++) {
-    const targetRow = (4 - moonRows.length + 1 + r) - moonYOffset; // legs land on row 4 by default
-    if (targetRow < 0 || targetRow >= ROWS) continue;
-    const text = moonRows[r];
-    for (let c = 0; c < text.length; c++) {
-      const x = MOON_FIXED_X + c;
-      if (x >= cols) break;
-      if (text[c] !== ' ') rows[targetRow][x] = text[c];
-    }
-  }
+  const moonBaseRow = MOON_LEG_ROW - moonRows.length + 1 - moonYOffset;
+  stampSprite(rows, moonRows, moonBaseRow, MOON_FIXED_X, cols);
 
-  // Obstacles. Cactus = ground-level on rows 3-4. Bird = high-altitude
-  // on rows 1-2 (passes over a grounded moon).
-  for (const o of obstacles) {
-    if (o.x < 0 || o.x >= cols) continue;
-    if (o.kind === 'cactus') {
-      // 2-row cactus: body + base. Use lighter glyphs at the column
-      // edges to suggest spines without claiming color we don't have.
-      const cactus = ['┃', '╿'];
-      for (let r = 0; r < cactus.length; r++) {
-        const targetRow = 3 + r;
-        if (targetRow >= ROWS - 1) continue;
-        rows[targetRow][o.x] = cactus[r];
-      }
-    } else {
-      // Bird flapping wings — 2-frame cycle on tick parity.
-      const flap = tick % 2 === 0 ? '<*>' : '<v>';
-      for (let c = 0; c < flap.length; c++) {
-        const x = o.x + c;
-        if (x < 0 || x >= cols) continue;
-        rows[1][x] = flap[c];
-      }
-    }
-  }
-
-  // Ground line — last row, ─ box-drawing across the full width.
-  rows[ROWS - 1] = new Array(cols).fill('─');
+  // Ground.
+  rows[GROUND_ROW] = new Array(cols).fill('─');
 
   return (
     <Box flexDirection='column' marginBottom={1}>
-      {rows.map((cells, idx) => (
-        <Text key={`mr-${idx}`} color={idx === 0 ? undefined : idx === ROWS - 1 ? undefined : 'yellow'} dimColor={idx === 0 || idx === ROWS - 1}>
-          {cells.join('')}
-        </Text>
-      ))}
+      {rows.map((cells, idx) => {
+        const isGround = idx === GROUND_ROW;
+        const isCloudRow = idx === 0;
+        const isStarRow = idx === 1;
+        return (
+          <Text
+            key={`mr-${idx}`}
+            color={isGround || isCloudRow ? undefined : 'yellow'}
+            dimColor={isGround || isCloudRow || isStarRow}
+          >
+            {cells.join('')}
+          </Text>
+        );
+      })}
     </Box>
   );
 };
