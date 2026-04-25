@@ -39,9 +39,10 @@ import SelectInput from 'ink-select-input';
 import TextInput from 'ink-text-input';
 import Spinner from 'ink-spinner';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { createWriteStream, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, openSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import * as path from 'node:path';
+import * as tty from 'node:tty';
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -50,16 +51,49 @@ const BRANCH = process.env.BRANCH ?? 'main';
 const WORK_DIR = process.env.WORK_DIR ?? path.join(tmpdir(), `lumi-build-${process.pid}`);
 const ENV_TOKEN = (process.env.GITHUB_TOKEN ?? '').trim();
 /**
- * Force non-interactive when:
- *   1. The user passed --yes / -y / set LUMI_INSTALL_YES=1, OR
- *   2. process.stdin isn't a TTY — Ink's <SelectInput> / <TextInput>
- *      use raw mode which requires a real TTY. The bash bootstrap
- *      already redirects stdin from /dev/tty when one's available
- *      (so curl-pipe-bash works); this guard catches the truly
- *      headless case (CI, container without /dev/tty, ssh -T) where
- *      no TTY exists at all and the alternative is an Ink crash.
+ * Resolve a stdin stream Ink can use for raw-mode keystroke capture.
+ *
+ * Why we don't just rely on `process.stdin`:
+ *   - Bun's `process.stdin.isTTY` is `undefined` in some versions
+ *     even when fd 0 is genuinely a TTY, which makes Ink's
+ *     `isRawModeSupported()` return false and silently disable input
+ *     (menu renders but arrow keys / Ctrl-C do nothing — exactly the
+ *     symptom reported).
+ *   - Under `curl … | bash`, fd 0 is the curl pipe, not a TTY at all.
+ *
+ * Strategy: open `/dev/tty` fresh as a `tty.ReadStream` and pass that
+ * to `render(<App />, { stdin })`. /dev/tty resolves to the
+ * controlling terminal regardless of how fd 0 is set, so Ink ends up
+ * with a stream where `setRawMode` actually works. Falls through to
+ * `process.stdin` only when /dev/tty can't be opened (true headless:
+ * CI, daemon, no controlling terminal) — in which case we force
+ * non-interactive mode and skip the keystroke-driven components.
  */
-const STDIN_IS_TTY = Boolean(process.stdin && process.stdin.isTTY);
+function resolveInkStdin(): { stream: NodeJS.ReadStream; isTTY: boolean } {
+  // 1. Try to open /dev/tty — the most reliable path on macOS / Linux
+  //    when there's a controlling terminal, regardless of pipes on fd 0.
+  if (existsSync('/dev/tty')) {
+    try {
+      const fd = openSync('/dev/tty', 'r');
+      const stream = new tty.ReadStream(fd) as unknown as NodeJS.ReadStream;
+      // Some Bun builds return a stream where isTTY is undefined even
+      // for /dev/tty — pin it to `true` so Ink's
+      // isRawModeSupported() returns true and raw mode actually
+      // engages.
+      Object.defineProperty(stream, 'isTTY', { value: true, writable: false, configurable: true });
+      return { stream, isTTY: true };
+    } catch {
+      // fall through to process.stdin
+    }
+  }
+  // 2. Fall back to process.stdin and trust whatever isTTY says (true
+  //    for the rare case the user invoked us in a pty without a
+  //    controlling terminal but still has fd 0 as a TTY).
+  const isTTY = Boolean(process.stdin && process.stdin.isTTY === true);
+  return { stream: process.stdin, isTTY };
+}
+
+const { stream: INK_STDIN, isTTY: STDIN_IS_TTY } = resolveInkStdin();
 const NON_INTERACTIVE = (() => {
   if (process.env.LUMI_INSTALL_YES === '1') return true;
   if (process.argv.slice(2).some((a) => a === '--yes' || a === '-y')) return true;
@@ -1124,5 +1158,11 @@ function truncate(line: string): string {
 
 // ── Entry point ────────────────────────────────────────────────────────────
 
-const { waitUntilExit } = render(<App />);
+// Pass the resolved TTY stream explicitly so Ink's raw-mode
+// keystroke capture works under `curl | bash` and on Bun builds
+// where process.stdin.isTTY is undefined.
+const { waitUntilExit } = render(<App />, {
+  stdin: INK_STDIN,
+  exitOnCtrlC: true,
+});
 await waitUntilExit();
