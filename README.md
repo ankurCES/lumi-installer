@@ -9,6 +9,15 @@
 </p>
 
 <p align="center">
+  <a href="#install"><img alt="Install" src="https://img.shields.io/badge/install-curl%20%7C%20bash-0aa?style=flat-square" /></a>
+  <a href="https://github.com/ankurCES/lumi-installer/wiki"><img alt="Wiki" src="https://img.shields.io/badge/docs-wiki-success?style=flat-square" /></a>
+  <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?style=flat-square" />
+  <img alt="Status" src="https://img.shields.io/badge/status-alpha-orange?style=flat-square" />
+  <img alt="Made with Electron" src="https://img.shields.io/badge/made%20with-Electron-2c3e50?style=flat-square&logo=electron&logoColor=white" />
+  <img alt="Built for Claude" src="https://img.shields.io/badge/built%20for-Claude%20Code-d97757?style=flat-square&logo=anthropic&logoColor=white" />
+</p>
+
+<p align="center">
   <img src="docs/moonrunner.gif" alt="Moonrunner — Lumi's animated banner" width="720" />
 </p>
 
