@@ -1392,4 +1392,18 @@ const { waitUntilExit } = render(<App />, {
   stdin: INK_STDIN,
   exitOnCtrlC: true,
 });
-await waitUntilExit();
+
+// Explicit process.exit after Ink unmounts so the script doesn't
+// linger after a successful install. Reported symptom: post-launch
+// the bun process stayed alive in the background until the user
+// killed it. Cause: the /dev/tty ReadStream we opened (via
+// `resolveInkStdin`) and assorted lingering animation timers keep
+// the event loop alive even after Ink's render unmounts. Force-
+// exit with the right code so the bash bootstrap's `exit $?` fires
+// and the parent shell gets control back immediately.
+try {
+  await waitUntilExit();
+  process.exit(0);
+} catch {
+  process.exit(1);
+}
