@@ -78,11 +78,56 @@ detect_tui() {
   # fit the banner + animation + a useful log region.
   if [[ "$NO_TUI" == "1" ]]; then return 1; fi
   if [[ ! -t 1 ]]; then return 1; fi
-  if ! command -v tput >/dev/null 2>&1; then return 1; fi
-  TERM_LINES=$(tput lines 2>/dev/null || echo 0)
-  TERM_COLS=$(tput cols 2>/dev/null || echo 0)
-  # Need height for banner (12) + sky (4) + ground (1) + min log (8)
-  if [[ "$TERM_LINES" -lt 25 || "$TERM_COLS" -lt 60 ]]; then return 1; fi
+
+  # Determine the *actual* terminal window size — `tput lines` /
+  # `tput cols` query the terminfo database which often returns the
+  # terminal type's *default* (e.g. xterm-256color → 24×80) rather
+  # than the live window size. That's why the previous version of
+  # this check tripped its `< 25` guard on terminals that were
+  # actually 40+ rows tall.
+  #
+  # `stty size < /dev/tty` asks the kernel for the controlling
+  # terminal's real size and works under curl-pipe-bash (stdin is
+  # the pipe, but /dev/tty bypasses that and goes straight to the
+  # user's terminal). We fall back to env vars and tput in case
+  # stty isn't reachable on a minimal container.
+  TERM_LINES=0
+  TERM_COLS=0
+  if command -v stty >/dev/null 2>&1; then
+    local stty_out
+    stty_out=$(stty size 2>/dev/null < /dev/tty || true)
+    if [[ -n "$stty_out" ]]; then
+      TERM_LINES=$(printf '%s' "$stty_out" | awk '{print $1}')
+      TERM_COLS=$(printf '%s' "$stty_out" | awk '{print $2}')
+    fi
+  fi
+  # Env-var fallback — interactive shells often export these even
+  # when stty isn't available (busybox, restricted shells).
+  if [[ "${TERM_LINES:-0}" -le 1 || "${TERM_COLS:-0}" -le 1 ]]; then
+    TERM_LINES="${LINES:-0}"
+    TERM_COLS="${COLUMNS:-0}"
+  fi
+  # Last-resort tput — accepts the terminfo default rather than
+  # erroring out, since that's still better than no animation at all.
+  if [[ "${TERM_LINES:-0}" -le 1 || "${TERM_COLS:-0}" -le 1 ]]; then
+    if command -v tput >/dev/null 2>&1; then
+      TERM_LINES=$(tput lines 2>/dev/null || echo 0)
+      TERM_COLS=$(tput cols 2>/dev/null || echo 0)
+    fi
+  fi
+
+  # Optional diagnostic — set OPENLAUDE_TUI_DEBUG=1 when filing a
+  # bug to see why the TUI didn't activate on a particular setup.
+  if [[ "${OPENLAUDE_TUI_DEBUG:-0}" == "1" ]]; then
+    printf '[tui-debug] TERM_LINES=%s TERM_COLS=%s TERM=%s\n' \
+      "$TERM_LINES" "$TERM_COLS" "${TERM:-unset}" >&2
+  fi
+
+  # Need height for banner (12) + sky (4) + ground (1) + min log (4).
+  # Threshold lowered from 25 to 22 — most modern terminals open
+  # well above this, and operators on tight tmux panes still get
+  # the static-banner fallback.
+  if [[ "${TERM_LINES:-0}" -lt 22 || "${TERM_COLS:-0}" -lt 60 ]]; then return 1; fi
   return 0
 }
 

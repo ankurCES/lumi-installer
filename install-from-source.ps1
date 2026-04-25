@@ -61,16 +61,43 @@ $script:LogBottomRow = 0
 
 function Test-TuiSupported {
   if ($env:OPENLAUDE_NO_TUI -eq '1') { return $false }
+  $script:TermLines = 0
+  $script:TermCols = 0
+
+  # Primary: $Host.UI.RawUI.WindowSize — the buffer-aware size in
+  # ConsoleHost. Reliable under Windows Terminal + the enhanced
+  # conhost shipping with Windows 10/11.
   try {
     $size = $Host.UI.RawUI.WindowSize
-    if (-not $size) { return $false }
-    $script:TermLines = $size.Height
-    $script:TermCols = $size.Width
+    if ($size) {
+      $script:TermLines = $size.Height
+      $script:TermCols  = $size.Width
+    }
   } catch {
-    return $false
+    # Fall through to System.Console
   }
-  # Need height for banner (12) + sky (4) + ground (1) + min log (8)
-  if ($script:TermLines -lt 25) { return $false }
+
+  # Fallback: [System.Console]::WindowHeight/Width — works in
+  # broader contexts (e.g. when invoked from within a pwsh runspace
+  # whose $Host.UI.RawUI is stubbed).
+  if ($script:TermLines -le 1 -or $script:TermCols -le 1) {
+    try {
+      $script:TermLines = [System.Console]::WindowHeight
+      $script:TermCols  = [System.Console]::WindowWidth
+    } catch {
+      # Both methods unavailable — give up on the TUI.
+    }
+  }
+
+  if ($env:OPENLAUDE_TUI_DEBUG -eq '1') {
+    Write-Host ("[tui-debug] TermLines={0} TermCols={1}" -f
+      $script:TermLines, $script:TermCols)
+  }
+
+  # Threshold lowered from 25 to 22 — the banner + animation block
+  # still fits and tight tmux panes / 80×24 PuTTY sessions get the
+  # static-banner fallback they want.
+  if ($script:TermLines -lt 22) { return $false }
   if ($script:TermCols -lt 60) { return $false }
   return $true
 }
