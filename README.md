@@ -1,52 +1,48 @@
-# Lumi installer
+<p align="center">
+  <img src="docs/lumi.png" alt="Lumi" width="160" />
+</p>
 
-Public mirror of the two build-from-source install scripts for Lumi.
+<h1 align="center">Lumi</h1>
 
-**The Lumi source is private** — it lives at
-[`ankurCES/OpenLaude`](https://github.com/ankurCES/OpenLaude) and
-requires collaborator access. This repo exists only so the install
-one-liner works without needing to authenticate to fetch the script
-itself; the script still prompts for your GitHub auth to clone the
-actual source.
+<p align="center">
+  She reads code. She writes it too. She remembers. She learns.
+</p>
+
+<p align="center">
+  <img src="docs/moonrunner.gif" alt="Moonrunner — Lumi's animated banner" width="720" />
+</p>
+
+---
+
+## About
+
+**Lumi** is a desktop AI workspace — your AI coworker for code, documents, and image / video generation, with team mode for long-running multi-step work.
+
+- **Optimised for Claude.** Bring your Claude Code CLI as the runtime; Lumi auto-provisions a sandboxed overlay (skills, MCP servers, persona) that never touches your global `~/.claude/` config.
+- **Built-in Lumi Engine** runtime. Works with Anthropic, OpenAI, Google Gemini, and locally-hosted models via Ollama, LM Studio, and similar providers. Each agent picks its own model.
+- **ComfyUI bundled in.** Image and video generation pipelines are auto-provisioned on first launch — no separate install.
+- **Team mode** for long-running tasks. Spawn a lead agent + a configurable team of specialists; the lead delegates, tracks progress, and reports back.
+
+---
 
 ## Install
 
-**macOS / Linux:**
+The installer handles everything: build-tool prerequisites (Bun, Node, pnpm, gh CLI), source clone, dependency install, app build, and first launch. Expect 3–5 minutes end-to-end.
+
+### macOS / Linux
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ankurCES/lumi-installer/main/install-from-source.sh | bash
 ```
 
-**Windows (PowerShell):**
+### Windows (PowerShell)
 
 ```powershell
 irm https://raw.githubusercontent.com/ankurCES/lumi-installer/main/install-from-source.ps1 | iex
 ```
 
-## What the script does
+You'll be asked whether to perform a clean install or an update, and prompted for GitHub authentication (gh CLI, PAT, or SSH — auto-detected). The Ink-based TUI guides you through the rest.
 
-1. Detects your platform (mac/linux/windows; arm64/x64).
-2. Installs any missing build deps (git, bun, pnpm, node ≥ 20) via
-   platform-appropriate means (winget, bun's installer, corepack).
-3. Authenticates to `ankurCES/OpenLaude` via — in order — `$GITHUB_TOKEN`,
-   `gh` CLI, SSH (mac/linux), or an interactive PAT prompt.
-4. Shallow-clones `ankurCES/OpenLaude` to a temp directory.
-5. Builds the Lumi engine (pnpm) + desktop app (bun + electron-builder).
-6. Installs the resulting artifact — `.dmg` → `/Applications` on macOS,
-   AppImage or `.deb` on Linux, NSIS silent install on Windows.
-7. Deletes the temp clone on success or failure (unless you pass
-   `SKIP_CLEANUP=1` or `KEEP_SOURCE=<path>`).
+---
 
-## Access to the source
-
-If you need a `repo`-scope Personal Access Token for an account that
-has access to `ankurCES/OpenLaude`, create one at
-<https://github.com/settings/tokens/new?scopes=repo>.
-
-## Sync mechanism
-
-This repo is a read-only mirror. The scripts here are pushed
-automatically from `ankurCES/OpenLaude/main` by a GitHub Action
-(`.github/workflows/sync-installer.yml`) every time one of the install
-scripts is modified. Do **not** edit files here by hand — any local
-edits will be overwritten on the next sync.
+> **Note — alpha release.** Lumi is currently in private alpha. The install will ask for a GitHub access token (or `gh` CLI auth) because the source repo is not public yet. If you'd like access, reach out and a time-limited PAT will be shared with you. The token, the build pipeline, and the installed app all run locally on your machine — nothing is sent to a remote service.
