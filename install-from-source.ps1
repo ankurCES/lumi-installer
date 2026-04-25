@@ -30,58 +30,322 @@ param()
 
 $ErrorActionPreference = 'Stop'
 
+# ─── TUI scaffolding ─────────────────────────────────────────────────────
+#
+# Moonlit dino-game animation + scrollable log region for long
+# non-interactive phases (clone, dependency install, build). PowerShell
+# parallel of the bash version in install-from-source.sh.
+#
+# Uses ANSI escape sequences directly — they're supported in modern
+# Windows Terminal and Windows 10/11's enhanced conhost. When the
+# terminal is too small, doesn't render escapes (legacy conhost),
+# or the user opts out via $env:OPENLAUDE_NO_TUI=1, we fall back to
+# the static banner with no animation.
+#
+# Background animation via Start-ThreadJob (lightweight runspace) so
+# the parent script stays unblocked. The thread writes to the
+# console with [System.Console]::Write — that bypasses Write-Host's
+# runspace coupling and renders directly to the terminal regardless
+# of which runspace the call originated in.
+
+$ESC = [char]27
+$script:USE_TUI = $false
+$script:TermLines = 0
+$script:TermCols = 0
+$script:AnimJob = $null
+$script:SkyTopRow = 0
+$script:SkyHeight = 4
+$script:GroundRow = 0
+$script:LogTopRow = 0
+$script:LogBottomRow = 0
+
+function Test-TuiSupported {
+  if ($env:OPENLAUDE_NO_TUI -eq '1') { return $false }
+  try {
+    $size = $Host.UI.RawUI.WindowSize
+    if (-not $size) { return $false }
+    $script:TermLines = $size.Height
+    $script:TermCols = $size.Width
+  } catch {
+    return $false
+  }
+  # Need height for banner (12) + sky (4) + ground (1) + min log (8)
+  if ($script:TermLines -lt 25) { return $false }
+  if ($script:TermCols -lt 60) { return $false }
+  return $true
+}
+
+function Tui-Init {
+  if (-not (Test-TuiSupported)) { return }
+  $script:SkyTopRow = 14
+  $script:GroundRow = $script:SkyTopRow + $script:SkyHeight
+  $script:LogTopRow = $script:GroundRow + 2
+  $script:LogBottomRow = $script:TermLines - 1
+
+  # Hide cursor + clear screen + draw banner inline so it sits
+  # statically above the animation block.
+  [System.Console]::Write("$ESC[?25l$ESC[2J$ESC[H")
+  Write-Host ''
+  Write-Host '                ·  ✦  🌙  ✦  ·' -ForegroundColor Magenta
+  Write-Host ''
+  Write-Host '    ██╗     ██╗   ██╗███╗   ███╗██╗' -ForegroundColor Cyan
+  Write-Host '    ██║     ██║   ██║████╗ ████║██║' -ForegroundColor Cyan
+  Write-Host '    ██║     ██║   ██║██╔████╔██║██║' -ForegroundColor Cyan
+  Write-Host '    ██║     ██║   ██║██║╚██╔╝██║██║' -ForegroundColor Cyan
+  Write-Host '    ███████╗╚██████╔╝██║ ╚═╝ ██║██║' -ForegroundColor Cyan
+  Write-Host '    ╚══════╝ ╚═════╝ ╚═╝     ╚═╝╚═╝' -ForegroundColor Cyan
+  Write-Host ''
+  Write-Host '           build-from-source installer' -ForegroundColor DarkGray
+
+  # Ground line, gold-tinted
+  [System.Console]::Write("$ESC[$($script:GroundRow);1H$ESC[33m")
+  $i = 1
+  while ($i -le $script:TermCols) {
+    [System.Console]::Write('─')
+    $i++
+  }
+  [System.Console]::Write("$ESC[0m")
+
+  # Lock the scroll region to the log block. `\n` from foreground
+  # writes inside this range scrolls only the region — banner +
+  # animation rows stay pinned.
+  [System.Console]::Write("$ESC[$($script:LogTopRow);$($script:LogBottomRow)r")
+  [System.Console]::Write("$ESC[$($script:LogBottomRow);1H")
+
+  # Spawn the animation thread. Start-ThreadJob is lighter than
+  # Start-Job (no separate process); falls back gracefully if
+  # ThreadJob module isn't available.
+  if (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue) {
+    $script:AnimJob = Start-ThreadJob -ScriptBlock {
+      param($skyTop, $skyHeight, $groundRow, $cols)
+      $ESC = [char]27
+      $moon_x = 8
+      $base_y = $groundRow - 1
+      $moon_y = $base_y
+      $jump_phase = 0
+      $obstacle_x = $cols - 4
+      $frame = 0
+      $sparkles = @()
+      for ($i = 0; $i -lt 4; $i++) { $sparkles += ($cols - $i * 17 - 5) }
+      $arc = @(0, 1, 2, 3, 4, 4, 4, 4, 3, 2, 1, 0, 0, 0)
+
+      while ($true) {
+        # Auto-jump physics — same arc as bash version.
+        if ($jump_phase -eq 0 -and
+            $obstacle_x -le ($moon_x + 6) -and
+            $obstacle_x -gt $moon_x) {
+          $jump_phase = 1
+        }
+        if ($jump_phase -gt 0) {
+          $moon_y = $base_y - $arc[$jump_phase - 1]
+          $jump_phase++
+          if ($jump_phase -gt 14) {
+            $jump_phase = 0
+            $moon_y = $base_y
+          }
+        }
+
+        # Scroll obstacle + sparkles
+        $obstacle_x--
+        if ($obstacle_x -lt 2) { $obstacle_x = $cols - 4 }
+        if (($frame % 3) -eq 0) {
+          for ($s = 0; $s -lt $sparkles.Count; $s++) {
+            $sparkles[$s]--
+            if ($sparkles[$s] -lt 2) { $sparkles[$s] = $cols - 4 }
+          }
+        }
+
+        # Repaint sky region
+        for ($r = $skyTop; $r -lt $groundRow; $r++) {
+          $pad = ' ' * ($cols - 2)
+          [System.Console]::Write("$ESC[$r;1H$pad")
+        }
+        # Sparkles at varying y for parallax depth
+        for ($s = 0; $s -lt $sparkles.Count; $s++) {
+          $sy = $skyTop + (($s * 7) % $skyHeight)
+          if ($sy -ge $groundRow) { $sy = $groundRow - 1 }
+          [System.Console]::Write("$ESC[$sy;$($sparkles[$s])H$ESC[2;36m·$ESC[0m")
+        }
+        # Asteroid
+        [System.Console]::Write("$ESC[$base_y;$obstacle_x" + "H$ESC[33m✦$ESC[0m")
+        # Moon — always 🌙 on Windows (modern terminals render emoji)
+        [System.Console]::Write("$ESC[$moon_y;$moon_x" + "H🌙")
+        [System.Console]::Out.Flush()
+
+        $frame++
+        Start-Sleep -Milliseconds 75
+      }
+    } -ArgumentList $script:SkyTopRow, $script:SkyHeight, $script:GroundRow, $script:TermCols
+    $script:USE_TUI = $true
+  }
+}
+
+function Tui-LogPosition {
+  if ($script:USE_TUI) {
+    [System.Console]::Write("$ESC[$($script:LogBottomRow);1H")
+  }
+}
+
+# Stop the animation, reset the scroll region, show the cursor.
+# Used around every Ask-* helper so prompts render normally and
+# the user's typing doesn't fight the moon for the same row.
+function Tui-Pause {
+  if (-not $script:USE_TUI) { return }
+  if ($script:AnimJob) {
+    $script:AnimJob | Stop-Job -ErrorAction SilentlyContinue
+    $script:AnimJob | Remove-Job -Force -ErrorAction SilentlyContinue
+    $script:AnimJob = $null
+  }
+  [System.Console]::Write("$ESC[r$ESC[?25h")
+  [System.Console]::Write("$ESC[$($script:TermLines);1H")
+  Write-Host ''
+}
+
+# Re-arm the TUI after a prompt. The killed subshell's frozen frame
+# vanishes and a fresh thread redraws — same UX as the bash version.
+function Tui-Resume {
+  if (-not $script:USE_TUI) { return }
+  if (-not (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)) { return }
+  [System.Console]::Write("$ESC[?25l")
+  [System.Console]::Write("$ESC[$($script:LogTopRow);$($script:LogBottomRow)r")
+  [System.Console]::Write("$ESC[$($script:LogBottomRow);1H")
+  $script:AnimJob = Start-ThreadJob -ScriptBlock {
+    param($skyTop, $skyHeight, $groundRow, $cols)
+    $ESC = [char]27
+    $moon_x = 8
+    $base_y = $groundRow - 1
+    $moon_y = $base_y
+    $jump_phase = 0
+    $obstacle_x = $cols - 4
+    $frame = 0
+    $sparkles = @()
+    for ($i = 0; $i -lt 4; $i++) { $sparkles += ($cols - $i * 17 - 5) }
+    $arc = @(0, 1, 2, 3, 4, 4, 4, 4, 3, 2, 1, 0, 0, 0)
+    while ($true) {
+      if ($jump_phase -eq 0 -and $obstacle_x -le ($moon_x + 6) -and $obstacle_x -gt $moon_x) {
+        $jump_phase = 1
+      }
+      if ($jump_phase -gt 0) {
+        $moon_y = $base_y - $arc[$jump_phase - 1]
+        $jump_phase++
+        if ($jump_phase -gt 14) { $jump_phase = 0; $moon_y = $base_y }
+      }
+      $obstacle_x--
+      if ($obstacle_x -lt 2) { $obstacle_x = $cols - 4 }
+      if (($frame % 3) -eq 0) {
+        for ($s = 0; $s -lt $sparkles.Count; $s++) {
+          $sparkles[$s]--
+          if ($sparkles[$s] -lt 2) { $sparkles[$s] = $cols - 4 }
+        }
+      }
+      for ($r = $skyTop; $r -lt $groundRow; $r++) {
+        $pad = ' ' * ($cols - 2)
+        [System.Console]::Write("$ESC[$r;1H$pad")
+      }
+      for ($s = 0; $s -lt $sparkles.Count; $s++) {
+        $sy = $skyTop + (($s * 7) % $skyHeight)
+        if ($sy -ge $groundRow) { $sy = $groundRow - 1 }
+        [System.Console]::Write("$ESC[$sy;$($sparkles[$s])H$ESC[2;36m·$ESC[0m")
+      }
+      [System.Console]::Write("$ESC[$base_y;$obstacle_x" + "H$ESC[33m✦$ESC[0m")
+      [System.Console]::Write("$ESC[$moon_y;$moon_x" + "H🌙")
+      [System.Console]::Out.Flush()
+      $frame++
+      Start-Sleep -Milliseconds 75
+    }
+  } -ArgumentList $script:SkyTopRow, $script:SkyHeight, $script:GroundRow, $script:TermCols
+}
+
+# Final cleanup — called from the main `Invoke-Cleanup` so it fires
+# on success, error, and trap exits. Idempotent.
+function Tui-Teardown {
+  if (-not $script:USE_TUI) { return }
+  if ($script:AnimJob) {
+    $script:AnimJob | Stop-Job -ErrorAction SilentlyContinue
+    $script:AnimJob | Remove-Job -Force -ErrorAction SilentlyContinue
+    $script:AnimJob = $null
+  }
+  [System.Console]::Write("$ESC[r$ESC[?25h")
+  [System.Console]::Write("$ESC[$($script:TermLines);1H")
+  Write-Host ''
+  $script:USE_TUI = $false
+}
+
 # ─── Styling helpers ─────────────────────────────────────────────────────
-function Write-Step  { param($msg) Write-Host "`n🌙 $msg" -ForegroundColor Cyan }
-function Write-Ok    { param($msg) Write-Host "  ✓ $msg" -ForegroundColor Green }
-function Write-Warn2 { param($msg) Write-Host "  ⚠ $msg" -ForegroundColor Yellow }
-function Write-Info  { param($msg) Write-Host "  · $msg" -ForegroundColor DarkGray }
+function Write-Step  { param($msg) Tui-LogPosition; Write-Host "`n🌙 $msg" -ForegroundColor Cyan }
+function Write-Ok    { param($msg) Tui-LogPosition; Write-Host "  ✓ $msg" -ForegroundColor Green }
+function Write-Warn2 { param($msg) Tui-LogPosition; Write-Host "  ⚠ $msg" -ForegroundColor Yellow }
+function Write-Info  { param($msg) Tui-LogPosition; Write-Host "  · $msg" -ForegroundColor DarkGray }
 function Die {
   param($msg)
+  Tui-LogPosition
   Write-Host "`n  ✗ $msg`n" -ForegroundColor Red
+  if ($script:USE_TUI) { Start-Sleep -Seconds 1 }
   exit 1
 }
 
 function Ask-Input {
   param([string]$prompt, [string]$default = '')
-  $hint = if ($default) { " [$default]" } else { '' }
-  $ans = Read-Host "? $prompt$hint"
-  if ([string]::IsNullOrWhiteSpace($ans)) { return $default }
-  return $ans
+  Tui-Pause
+  try {
+    $hint = if ($default) { " [$default]" } else { '' }
+    $ans = Read-Host "? $prompt$hint"
+    if ([string]::IsNullOrWhiteSpace($ans)) { return $default }
+    return $ans
+  } finally {
+    Tui-Resume
+  }
 }
 
 function Ask-Secret {
   param([string]$prompt)
-  $secure = Read-Host "? $prompt" -AsSecureString
-  $ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-  try { [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
-  finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+  Tui-Pause
+  try {
+    $secure = Read-Host "? $prompt" -AsSecureString
+    $ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    try { [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
+    finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+  } finally {
+    Tui-Resume
+  }
 }
 
 function Ask-YesNo {
   param([string]$prompt, [string]$default = 'y')
-  $hint = if ($default -eq 'y') { '[Y/n]' } else { '[y/N]' }
-  $ans = Read-Host "? $prompt $hint"
-  if ([string]::IsNullOrWhiteSpace($ans)) { $ans = $default }
-  return ($ans -match '^[Yy]')
+  Tui-Pause
+  try {
+    $hint = if ($default -eq 'y') { '[Y/n]' } else { '[y/N]' }
+    $ans = Read-Host "? $prompt $hint"
+    if ([string]::IsNullOrWhiteSpace($ans)) { $ans = $default }
+    return ($ans -match '^[Yy]')
+  } finally {
+    Tui-Resume
+  }
 }
 
-# ─── Banner ──────────────────────────────────────────────────────────────
-# Matches the engine CLI banner (packages/lumi-engine/src/cli/banner.ts)
-# so the installer feels like part of the same product — moon icon +
-# LUMI block art rendered in two tones.
-Write-Host ''
-Write-Host '                ·  ✦  🌙  ✦  ·' -ForegroundColor Magenta
-Write-Host ''
-Write-Host '    ██╗     ██╗   ██╗███╗   ███╗██╗' -ForegroundColor Cyan
-Write-Host '    ██║     ██║   ██║████╗ ████║██║' -ForegroundColor Cyan
-Write-Host '    ██║     ██║   ██║██╔████╔██║██║' -ForegroundColor Cyan
-Write-Host '    ██║     ██║   ██║██║╚██╔╝██║██║' -ForegroundColor Cyan
-Write-Host '    ███████╗╚██████╔╝██║ ╚═╝ ██║██║' -ForegroundColor Cyan
-Write-Host '    ╚══════╝ ╚═════╝ ╚═╝     ╚═╝╚═╝' -ForegroundColor Cyan
-Write-Host ''
-Write-Host '           build-from-source installer' -ForegroundColor DarkGray
-Write-Host '    Your AI coworker, built fresh from HEAD.' -ForegroundColor DarkGray
-Write-Host ''
+# ─── Banner / TUI init ──────────────────────────────────────────────────
+# Try to bring the moonlit dino-game TUI up (Windows Terminal +
+# Windows 10/11 enhanced conhost render the ANSI escapes). When the
+# terminal is too small, doesn't support escapes, or the user passed
+# $env:OPENLAUDE_NO_TUI=1, we fall back to the plain banner — same
+# identity, no animation. The TUI version draws the same banner inline
+# so the moon + LUMI block art appears regardless of mode.
+Tui-Init
+if (-not $script:USE_TUI) {
+  Write-Host ''
+  Write-Host '                ·  ✦  🌙  ✦  ·' -ForegroundColor Magenta
+  Write-Host ''
+  Write-Host '    ██╗     ██╗   ██╗███╗   ███╗██╗' -ForegroundColor Cyan
+  Write-Host '    ██║     ██║   ██║████╗ ████║██║' -ForegroundColor Cyan
+  Write-Host '    ██║     ██║   ██║██╔████╔██║██║' -ForegroundColor Cyan
+  Write-Host '    ██║     ██║   ██║██║╚██╔╝██║██║' -ForegroundColor Cyan
+  Write-Host '    ███████╗╚██████╔╝██║ ╚═╝ ██║██║' -ForegroundColor Cyan
+  Write-Host '    ╚══════╝ ╚═════╝ ╚═╝     ╚═╝╚═╝' -ForegroundColor Cyan
+  Write-Host ''
+  Write-Host '           build-from-source installer' -ForegroundColor DarkGray
+  Write-Host '    Your AI coworker, built fresh from HEAD.' -ForegroundColor DarkGray
+  Write-Host ''
+}
 
 $Repo       = if ($env:REPO)    { $env:REPO }    else { 'ankurCES/OpenLaude' }
 $Branch     = if ($env:BRANCH)  { $env:BRANCH }  else { 'main' }
@@ -108,6 +372,10 @@ Write-Ok "Detected: windows/$arch"
 
 # ─── Cleanup registration ────────────────────────────────────────────────
 function Invoke-Cleanup {
+  # Tear the TUI down FIRST so cleanup output isn't trapped inside
+  # the now-stale scroll region or hidden behind the animation.
+  # Idempotent — no-op when the TUI isn't active.
+  Tui-Teardown
   if ($env:SKIP_CLEANUP -eq '1') {
     Write-Host ''
     Write-Host "Kept $WorkDir for debugging" -ForegroundColor DarkGray
@@ -369,6 +637,29 @@ try {
     }
   } finally {
     Pop-Location
+  }
+
+  # ─── Auto-launch the freshly-installed app ────────────────────────────
+  # Parity with the bash installer's `launch_lumi_app` step. The in-app
+  # "Install Update" flow expects this script to bring Lumi back up
+  # automatically — otherwise the user is left staring at a closed app
+  # after the NSIS silent install finishes. Best-effort: looks in the
+  # standard NSIS install destination (Local AppData) plus the system-
+  # wide Program Files path and starts the first match. Silent no-op
+  # when neither exists or when $env:NO_LAUNCH=1.
+  if ($env:NO_LAUNCH -ne '1') {
+    $candidates = @(
+      (Join-Path $env:LOCALAPPDATA 'Programs\Lumi\Lumi.exe'),
+      (Join-Path ${env:ProgramFiles} 'Lumi\Lumi.exe'),
+      (Join-Path ${env:ProgramFiles(x86)} 'Lumi\Lumi.exe')
+    )
+    foreach ($exe in $candidates) {
+      if ($exe -and (Test-Path $exe)) {
+        Write-Info "launching $exe..."
+        Start-Process -FilePath $exe -ErrorAction SilentlyContinue
+        break
+      }
+    }
   }
 
   # ─── Final banner ──────────────────────────────────────────────────────
