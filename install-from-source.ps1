@@ -1,7 +1,7 @@
 # Lumi — build-from-source installer (Windows)
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/ankurCES/OpenLaude/main/install-from-source.ps1 | iex
+#   irm https://raw.githubusercontent.com/ankurCES/lumi-installer/main/install-from-source.ps1 | iex
 #
 # Bootstrap layer: install Bun + Node + pnpm + gh CLI if missing,
 # fetch the Ink TUI (install-from-source.tsx), and hand off to it.
@@ -13,10 +13,16 @@
 
 $ErrorActionPreference = 'Stop'
 
-$Repo   = if ($env:REPO) { $env:REPO } else { 'ankurCES/OpenLaude' }
-$Branch = if ($env:BRANCH) { $env:BRANCH } else { 'main' }
-$TsxUrl = if ($env:TSX_URL) { $env:TSX_URL } else {
-  "https://raw.githubusercontent.com/$Repo/$Branch/install-from-source.tsx"
+# Repo + Branch point at the SOURCE repo the Ink installer will git-
+# clone (private, requires auth — handled inside the Ink app's auth
+# flow). TsxRepo + TsxBranch point at the public mirror this script
+# self-references to fetch the Ink TSX without auth.
+$Repo      = if ($env:REPO) { $env:REPO } else { 'ankurCES/OpenLaude' }
+$Branch    = if ($env:BRANCH) { $env:BRANCH } else { 'main' }
+$TsxRepo   = if ($env:TSX_REPO) { $env:TSX_REPO } else { 'ankurCES/lumi-installer' }
+$TsxBranch = if ($env:TSX_BRANCH) { $env:TSX_BRANCH } else { 'main' }
+$TsxUrl    = if ($env:TSX_URL) { $env:TSX_URL } else {
+  "https://raw.githubusercontent.com/$TsxRepo/$TsxBranch/install-from-source.tsx"
 }
 
 function Write-Step($msg) { Write-Host "● $msg" -ForegroundColor Cyan }

@@ -3,7 +3,7 @@
 # Lumi — build-from-source installer (macOS + Linux)
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/ankurCES/OpenLaude/main/install-from-source.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/ankurCES/lumi-installer/main/install-from-source.sh | bash
 #
 # This script is a *bootstrap*. Its only job is to make the build-tool
 # prerequisites available (Bun, Node ≥ 20, pnpm) and then hand off to
@@ -24,9 +24,17 @@
 
 set -euo pipefail
 
+# REPO + BRANCH point at the SOURCE repo the Ink installer will git-
+# clone (private, requires auth — handled inside the Ink app's auth
+# flow). TSX_REPO + TSX_BRANCH point at the public PUBLIC mirror
+# this script self-references to fetch the Ink TSX without auth.
+# Keeping them split means a user can override REPO=their-fork without
+# breaking the public TSX fetch path.
 REPO="${REPO:-ankurCES/OpenLaude}"
 BRANCH="${BRANCH:-main}"
-TSX_URL="${TSX_URL:-https://raw.githubusercontent.com/${REPO}/${BRANCH}/install-from-source.tsx}"
+TSX_REPO="${TSX_REPO:-ankurCES/lumi-installer}"
+TSX_BRANCH="${TSX_BRANCH:-main}"
+TSX_URL="${TSX_URL:-https://raw.githubusercontent.com/${TSX_REPO}/${TSX_BRANCH}/install-from-source.tsx}"
 
 # ─── ANSI styling ────────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
