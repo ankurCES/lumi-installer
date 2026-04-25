@@ -301,52 +301,60 @@ const App: React.FC = () => {
 
   return (
     <Box flexDirection='column' paddingX={1}>
-      <Header />
-      {/* Moon-runner animation runs continuously through every step
-          — the user asked for the same animated moon character the
-          renderer's Moonrunner draws, scaled down to a multi-line
-          ASCII sprite that hops across a baseline. */}
-      <MoonRunner />
-      {state.step === 'splash' && <SplashAnimation />}
-      {state.step === 'menu' && (
-        <InstallTypeMenu
-          onSelect={(value) => {
-            dispatch({ type: 'set-install-type', value });
-            dispatch({ type: 'set-step', value: 'auth-picker' });
-          }}
-        />
-      )}
-      {state.step === 'auth-picker' && (
-        <AuthPicker
-          detected={state.authMethod}
-          hasGhCli={state.hasGhCli}
-          ghAuthOk={state.ghAuthOk}
-          sshOk={state.sshOk}
-          onConfirm={() => dispatch({ type: 'set-step', value: 'running' })}
-          onPickPat={() => dispatch({ type: 'set-step', value: 'pat-input' })}
-          onPickGh={() => {
-            dispatch({ type: 'set-auth-method', value: 'gh', cloneUrl: '' });
-            dispatch({ type: 'set-step', value: 'running' });
-          }}
-          onPickSsh={() => {
-            dispatch({ type: 'set-auth-method', value: 'ssh', cloneUrl: `git@github.com:${REPO}.git` });
-            dispatch({ type: 'set-step', value: 'running' });
-          }}
-        />
-      )}
-      {state.step === 'pat-input' && (
-        <PATInput
-          onSubmit={(pat) => {
-            dispatch({
-              type: 'set-auth-method',
-              value: 'pat',
-              cloneUrl: `https://${pat}@github.com/${REPO}.git`,
-            });
-            dispatch({ type: 'set-pat', value: pat });
-            dispatch({ type: 'set-step', value: 'running' });
-          }}
-        />
-      )}
+      {/* Centered upper region — banner, animation, and the keystroke-
+          driven prompts (menu / auth picker / PAT input) all sit
+          horizontally centered. The verbose progress region below is
+          intentionally left-aligned (per spec: verbose is fine as-is). */}
+      <Box flexDirection='column' alignItems='center'>
+        <Header />
+        {/* Chrome-Dino-style scene starring the renderer's moon
+            character. Centered (alignItems='center' on the parent +
+            self-bounded width inside MoonRunner). */}
+        <MoonRunner />
+        {state.step === 'splash' && <SplashAnimation />}
+        {state.step === 'menu' && (
+          <InstallTypeMenu
+            onSelect={(value) => {
+              dispatch({ type: 'set-install-type', value });
+              dispatch({ type: 'set-step', value: 'auth-picker' });
+            }}
+          />
+        )}
+        {state.step === 'auth-picker' && (
+          <AuthPicker
+            detected={state.authMethod}
+            hasGhCli={state.hasGhCli}
+            ghAuthOk={state.ghAuthOk}
+            sshOk={state.sshOk}
+            onConfirm={() => dispatch({ type: 'set-step', value: 'running' })}
+            onPickPat={() => dispatch({ type: 'set-step', value: 'pat-input' })}
+            onPickGh={() => {
+              dispatch({ type: 'set-auth-method', value: 'gh', cloneUrl: '' });
+              dispatch({ type: 'set-step', value: 'running' });
+            }}
+            onPickSsh={() => {
+              dispatch({ type: 'set-auth-method', value: 'ssh', cloneUrl: `git@github.com:${REPO}.git` });
+              dispatch({ type: 'set-step', value: 'running' });
+            }}
+          />
+        )}
+        {state.step === 'pat-input' && (
+          <PATInput
+            onSubmit={(pat) => {
+              dispatch({
+                type: 'set-auth-method',
+                value: 'pat',
+                cloneUrl: `https://${pat}@github.com/${REPO}.git`,
+              });
+              dispatch({ type: 'set-pat', value: pat });
+              dispatch({ type: 'set-step', value: 'running' });
+            }}
+          />
+        )}
+      </Box>
+      {/* Left-aligned verbose progress region. Stays put under the
+          centered banner so the bordered log box reads the way a
+          terminal log usually does. */}
       {(state.step === 'running' || state.step === 'done' || state.step === 'error') && (
         <ProgressView state={state} />
       )}
@@ -494,9 +502,17 @@ interface Obstacle {
   spawnedAt: number;
 }
 
+/** How wide the scene gets capped at when the terminal is wider — keeps
+ *  the moon-runner readable without sprawling across a 200-col window. */
+const SCENE_MAX_COLS = 80;
+
 const MoonRunner: React.FC = () => {
   const { stdout } = useStdout();
-  const cols = Math.max(50, Math.min(stdout?.columns ?? 80, 200));
+  const termCols = stdout?.columns ?? 80;
+  // Scene width: bounded so the centered animation has stable
+  // proportions across narrow / wide terminals. Don't exceed the
+  // actual terminal, don't go below 50.
+  const cols = Math.max(50, Math.min(termCols - 4, SCENE_MAX_COLS));
   const [tick, setTick] = useState(0);
 
   useEffect(() => {

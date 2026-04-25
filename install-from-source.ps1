@@ -201,6 +201,16 @@ Write-Host ""
 
 # ─── Hand off to Ink installer ────────────────────────────────────────────
 Set-Location $Work
+
+# Clear the terminal so the bootstrap's prereq-check output doesn't sit
+# above the Ink UI. `Clear-Host` is the PowerShell-canonical version of
+# the bash printf '\033[2J\033[H' clear we use on macOS / Linux. Only
+# clear when running interactively — CI / piped invocations get plain
+# output without the ANSI control sequences.
+if ($Host.UI.SupportsVirtualTerminal -or $Host.Name -eq 'ConsoleHost') {
+  Clear-Host
+}
+
 & bun install-from-source.tsx @args
 $bunExit = $LASTEXITCODE
 & $cleanupBlock

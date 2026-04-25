@@ -224,6 +224,15 @@ echo
 # inherited pipe — the TSX detects the non-TTY case and forces
 # non-interactive mode rather than throwing.
 cd "$WORK"
+
+# Clear the terminal so the bootstrap's prereq-check output doesn't
+# sit above the Ink UI when it mounts. Only do this if stdout is a
+# TTY — piped output (CI logs, etc.) shouldn't get ANSI escape codes
+# that look like garbage in a log viewer.
+if [[ -t 1 ]]; then
+  printf '\033[2J\033[H'
+fi
+
 if [[ -e /dev/tty ]]; then
   bun install-from-source.tsx "$@" </dev/tty
 else
