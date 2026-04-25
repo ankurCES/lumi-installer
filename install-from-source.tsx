@@ -34,7 +34,7 @@
  */
 
 import React, { useEffect, useMemo, useReducer, useState, useRef } from 'react';
-import { render, Box, Text, useApp, useInput } from 'ink';
+import { render, Box, Text, useApp, useInput, useStdout } from 'ink';
 import SelectInput from 'ink-select-input';
 import TextInput from 'ink-text-input';
 import Spinner from 'ink-spinner';
@@ -378,93 +378,245 @@ const Header: React.FC = () => (
       ))}
     </Box>
     <Text dimColor>build-from-source installer</Text>
-    <Text dimColor>Your AI coworker, built fresh from HEAD.</Text>
+    <TaglineTypewriter />
   </Box>
 );
 
-// ── MoonRunner — running moon character ────────────────────────────────────
+// ── Tagline typewriter ─────────────────────────────────────────────────────
 
 /**
- * ASCII port of the renderer's Moonrunner moon character (see
- * apps/desktop/src/renderer/pages/guid/components/Moonrunner.tsx,
- * `drawMoon` at line 303). The DOM/canvas version draws a crescent
- * body via radial gradient + a sky-coloured "bite" overlay; in a
- * terminal we approximate that with a parenthesised face + a
- * single-eye dot, plus a 2-frame stick-limb run cycle.
+ * Cycling tagline that mirrors the renderer's Moonrunner banner +
+ * the splash HTML's typewriter. Fixed prefix `She ` stays put; the
+ * suffix list ('reads code.' → 'writes it too.' → 'remembers.' →
+ * 'learns.') types in, holds, backspaces, and rolls to the next.
  *
- * The moon drifts across the line continuously regardless of which
- * screen the rest of the app is showing — so the splash, menu,
- * auth picker, and bordered progress region all sit below the same
- * running animation, matching the user's spec ("animation on top
- * header while verbose shows below in a neat section").
+ * Cadences match Moonrunner.tsx (TYPE_CHAR_MS 75, DELETE_CHAR_MS 40,
+ * HOLD_MS 1400, PRE_TYPE_PAUSE_MS 280) so the three surfaces — main
+ * app, splash, installer — feel like one identity.
  */
-const MOON_TRACK_WIDTH = 60;
-const MOON_TICK_MS = 110;
+const TAGLINE_PREFIX = 'She ';
+const TAGLINE_SUFFIXES = ['reads code.', 'writes it too.', 'remembers.', 'learns.'];
+const TAGLINE_TYPE_MS = 75;
+const TAGLINE_DELETE_MS = 40;
+const TAGLINE_HOLD_MS = 1400;
+const TAGLINE_PRE_TYPE_MS = 280;
 
-const MoonRunner: React.FC = () => {
-  const [frame, setFrame] = useState(0);
+type TaglinePhase = 'typing' | 'holding' | 'deleting' | 'pre-type';
+
+const TaglineTypewriter: React.FC = () => {
+  const [suffixIdx, setSuffixIdx] = useState(0);
+  const [charIdx, setCharIdx] = useState(0);
+  const [phase, setPhase] = useState<TaglinePhase>('typing');
+  const [cursorVisible, setCursorVisible] = useState(true);
+
   useEffect(() => {
-    const id = setInterval(() => setFrame((f) => (f + 1) % MOON_TRACK_WIDTH), MOON_TICK_MS);
+    const target = TAGLINE_SUFFIXES[suffixIdx] ?? '';
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (phase === 'typing') {
+      if (charIdx >= target.length) {
+        timer = setTimeout(() => setPhase('holding'), TAGLINE_HOLD_MS);
+      } else {
+        timer = setTimeout(() => setCharIdx(charIdx + 1), TAGLINE_TYPE_MS);
+      }
+    } else if (phase === 'holding') {
+      timer = setTimeout(() => setPhase('deleting'), TAGLINE_DELETE_MS);
+    } else if (phase === 'deleting') {
+      if (charIdx <= 0) {
+        timer = setTimeout(() => {
+          setSuffixIdx((s) => (s + 1) % TAGLINE_SUFFIXES.length);
+          setPhase('pre-type');
+        }, TAGLINE_PRE_TYPE_MS);
+      } else {
+        timer = setTimeout(() => setCharIdx(charIdx - 1), TAGLINE_DELETE_MS);
+      }
+    } else if (phase === 'pre-type') {
+      timer = setTimeout(() => setPhase('typing'), TAGLINE_TYPE_MS);
+    }
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
+  }, [phase, charIdx, suffixIdx]);
+
+  // Blinking block cursor — fixed cadence independent of typing.
+  useEffect(() => {
+    const id = setInterval(() => setCursorVisible((v) => !v), 500);
     return () => clearInterval(id);
   }, []);
 
-  const moonX = frame; // 0..MOON_TRACK_WIDTH-1
-  const pad = ' '.repeat(moonX);
-
-  // 2-frame run cycle. Frame 0: arms ╱│╲, legs ╱ ╲ (right leg forward).
-  // Frame 1: arms ╲│╱, legs ╲ ╱ (left leg forward). Swapping every
-  // tick gives the deliberate, slightly-mechanical Chrome-Dino
-  // cadence the canvas version uses.
-  const runFrame = Math.floor(frame / 2) % 2;
-  const arms = runFrame === 0 ? '╱│╲' : '╲│╱';
-  const legs = runFrame === 0 ? '╱ ╲' : '╲ ╱';
-
+  const visibleSuffix = (TAGLINE_SUFFIXES[suffixIdx] ?? '').slice(0, charIdx);
   return (
-    <Box flexDirection='column' marginBottom={1}>
-      {/* Sky line — sparse stars that twinkle on phase parity. */}
-      <Text dimColor>
-        {twinkleRow(frame, MOON_TRACK_WIDTH + 8)}
-      </Text>
-      <Box>
-        <Text>{pad}</Text>
-        <Text color='yellow' bold>
-          {' ___ '}
-        </Text>
-      </Box>
-      <Box>
-        <Text>{pad}</Text>
-        <Text color='yellow' bold>
-          {'( ◔ )'}
-        </Text>
-      </Box>
-      <Box>
-        <Text>{pad}</Text>
-        <Text color='yellowBright'>{` ${arms} `}</Text>
-      </Box>
-      <Box>
-        <Text>{pad}</Text>
-        <Text color='yellowBright'>{` ${legs} `}</Text>
-      </Box>
-      {/* Ground line beneath the runner — unicode box-drawing for a
-          clean horizon, slightly wider than the track so the moon
-          never visibly overshoots. */}
-      <Text dimColor>{'─'.repeat(MOON_TRACK_WIDTH + 8)}</Text>
+    <Box>
+      <Text dimColor>{TAGLINE_PREFIX}</Text>
+      <Text color='yellow'>{visibleSuffix}</Text>
+      <Text color='yellow'>{cursorVisible ? '▌' : ' '}</Text>
     </Box>
   );
 };
 
-function twinkleRow(frame: number, width: number): string {
-  const positions = [3, 11, 19, 27, 35, 43, 51, 59, 67];
-  const symbols = ['·', '✦', '✧', '·', '✦'];
-  const out: string[] = new Array(width).fill(' ');
-  for (let i = 0; i < positions.length; i++) {
-    const pos = positions[i];
-    if (pos >= width) break;
-    const visible = (frame + i * 5) % 13 < 7;
-    if (visible) out[pos] = symbols[i % symbols.length];
-  }
-  return out.join('');
+// ── MoonRunner — Chrome-Dino-style scene ────────────────────────────────────
+
+/**
+ * Full-width Chrome-Dino-style scene starring the renderer's
+ * Moonrunner moon character (see apps/desktop/src/renderer/pages/
+ * guid/components/Moonrunner.tsx, `drawMoon` at line 303). The
+ * DOM/canvas version draws a crescent body via radial gradient + a
+ * sky-coloured "bite" overlay + stick-figure limbs; in a terminal we
+ * approximate it with a parenthesised crescent face `(`/`)` + a single
+ * eye dot, plus a 2-frame stick-limb run cycle.
+ *
+ * Layout (full terminal width via useStdout):
+ *   Row 0: twinkling stars (sky)
+ *   Row 1: moon top crescent — shifts up while jumping
+ *   Row 2: moon body
+ *   Row 3: moon arms + bird obstacles (high-altitude)
+ *   Row 4: moon legs + cactus obstacles (ground-level)
+ *   Row 5: ground line ─────────
+ *
+ * Obstacles spawn off the right edge and scroll left at one column
+ * per tick. When the nearest cactus is within JUMP_LEAD columns of
+ * the moon, the moon jumps — its sprite shifts up by 2 rows for the
+ * duration of the obstacle's pass, mirroring the canvas Moonrunner's
+ * jump arc semantics.
+ */
+const MOON_TICK_MS = 110;
+/** Where the moon's left edge sits in the row, fixed across the run. */
+const MOON_FIXED_X = 6;
+/** Distance (in cols) at which the moon decides to jump over an upcoming cactus. */
+const JUMP_LEAD = 6;
+/** How long (in ticks) the moon stays elevated once committed to a jump. */
+const JUMP_DURATION = 6;
+
+type ObstacleKind = 'cactus' | 'bird';
+interface Obstacle {
+  kind: ObstacleKind;
+  x: number;
+  /** Tick index at which this obstacle was spawned — used as a stable id. */
+  spawnedAt: number;
 }
+
+const MoonRunner: React.FC = () => {
+  const { stdout } = useStdout();
+  const cols = Math.max(50, Math.min(stdout?.columns ?? 80, 200));
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), MOON_TICK_MS);
+    return () => clearInterval(id);
+  }, []);
+
+  // Spawn obstacles off the right edge at irregular intervals so the
+  // pattern doesn't feel mechanical. Birds are rarer than cacti.
+  const obstacles = useMemo<Obstacle[]>(() => {
+    const result: Obstacle[] = [];
+    // Walk back through recent spawn ticks; an obstacle spawned at
+    // tick T is at column (cols - 1 - (tick - T)). Past the left edge?
+    // Drop it.
+    const SPAWN_STRIDE = 14;
+    for (let spawnedAt = tick; spawnedAt >= 0; spawnedAt -= 1) {
+      // Spawn on cadence ticks (every SPAWN_STRIDE), with some jitter.
+      const phase = spawnedAt % SPAWN_STRIDE;
+      const isSpawnTick = phase === 0 || phase === Math.floor(SPAWN_STRIDE * 0.6);
+      if (!isSpawnTick) continue;
+      const x = cols - 1 - (tick - spawnedAt);
+      if (x < 0) break; // off the left edge — earlier spawns are also gone
+      // Bird every 3rd spawn slot, cactus otherwise. Birds fly high so
+      // they pass over the moon when it's grounded; cacti are
+      // ground-level and require a jump.
+      const kind: ObstacleKind = (spawnedAt / SPAWN_STRIDE) % 3 === 0 ? 'bird' : 'cactus';
+      result.push({ kind, x, spawnedAt });
+    }
+    return result;
+  }, [tick, cols]);
+
+  // Decide if the moon should be jumping this tick — "yes" if any
+  // cactus is between MOON_FIXED_X and MOON_FIXED_X + JUMP_LEAD. Hold
+  // the jump for JUMP_DURATION ticks so the silhouette has a visible
+  // arc instead of a one-frame blip.
+  const jumping = obstacles.some(
+    (o) =>
+      o.kind === 'cactus' && o.x >= MOON_FIXED_X - 1 && o.x <= MOON_FIXED_X + JUMP_LEAD,
+  );
+  // Persist a jump for a few ticks once committed — track via a ref so
+  // we don't oscillate when the cactus is right under the moon.
+  const jumpUntilRef = useRef(0);
+  if (jumping) {
+    jumpUntilRef.current = Math.max(jumpUntilRef.current, tick + JUMP_DURATION);
+  }
+  const isElevated = tick < jumpUntilRef.current;
+  const moonYOffset = isElevated ? 2 : 0; // shift sprite up by 2 rows during jump
+
+  // Build the rows from a column buffer so moon + obstacles + stars
+  // can coexist on the same line without z-order headaches.
+  const ROWS = 6;
+  const rows: string[][] = Array.from({ length: ROWS }, () => new Array(cols).fill(' '));
+
+  // Sky stars (row 0).
+  const starPositions = [3, 11, 19, 27, 35, 43, 51, 59, 67, 75, 83, 91, 99];
+  const starGlyphs = ['·', '✦', '✧', '·', '✦', '·'];
+  for (let i = 0; i < starPositions.length; i++) {
+    const x = starPositions[i];
+    if (x >= cols) break;
+    if ((tick + i * 5) % 13 < 7) rows[0][x] = starGlyphs[i % starGlyphs.length];
+  }
+
+  // Moon sprite — 4 rows tall: top crescent, body, arms, legs. The
+  // grounded baseline puts legs on row 4 (just above ground row 5).
+  // When elevated, every row shifts up by `moonYOffset`.
+  const runFrame = Math.floor(tick / 2) % 2;
+  const moonRows = [
+    ' __ ', // top crescent — open paren + concave top
+    '( o)', // body — single eye dot, crescent face
+    runFrame === 0 ? ' /|\\' : ' \\|/', // arms swap each tick
+    runFrame === 0 ? ' / \\' : ' \\ /', // legs swap each tick
+  ];
+  for (let r = 0; r < moonRows.length; r++) {
+    const targetRow = (4 - moonRows.length + 1 + r) - moonYOffset; // legs land on row 4 by default
+    if (targetRow < 0 || targetRow >= ROWS) continue;
+    const text = moonRows[r];
+    for (let c = 0; c < text.length; c++) {
+      const x = MOON_FIXED_X + c;
+      if (x >= cols) break;
+      if (text[c] !== ' ') rows[targetRow][x] = text[c];
+    }
+  }
+
+  // Obstacles. Cactus = ground-level on rows 3-4. Bird = high-altitude
+  // on rows 1-2 (passes over a grounded moon).
+  for (const o of obstacles) {
+    if (o.x < 0 || o.x >= cols) continue;
+    if (o.kind === 'cactus') {
+      // 2-row cactus: body + base. Use lighter glyphs at the column
+      // edges to suggest spines without claiming color we don't have.
+      const cactus = ['┃', '╿'];
+      for (let r = 0; r < cactus.length; r++) {
+        const targetRow = 3 + r;
+        if (targetRow >= ROWS - 1) continue;
+        rows[targetRow][o.x] = cactus[r];
+      }
+    } else {
+      // Bird flapping wings — 2-frame cycle on tick parity.
+      const flap = tick % 2 === 0 ? '<*>' : '<v>';
+      for (let c = 0; c < flap.length; c++) {
+        const x = o.x + c;
+        if (x < 0 || x >= cols) continue;
+        rows[1][x] = flap[c];
+      }
+    }
+  }
+
+  // Ground line — last row, ─ box-drawing across the full width.
+  rows[ROWS - 1] = new Array(cols).fill('─');
+
+  return (
+    <Box flexDirection='column' marginBottom={1}>
+      {rows.map((cells, idx) => (
+        <Text key={`mr-${idx}`} color={idx === 0 ? undefined : idx === ROWS - 1 ? undefined : 'yellow'} dimColor={idx === 0 || idx === ROWS - 1}>
+          {cells.join('')}
+        </Text>
+      ))}
+    </Box>
+  );
+};
 
 /** Splash-only tagline shown alongside MoonRunner during the brief intro phase. */
 const SplashAnimation: React.FC = () => (
