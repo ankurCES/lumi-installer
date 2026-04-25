@@ -1,7 +1,7 @@
 # Lumi — build-from-source installer (Windows)
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/ankurCES/lumi-installer/main/install-from-source.ps1 | iex
+#   irm https://raw.githubusercontent.com/ankurCES/OpenLaude/main/install-from-source.ps1 | iex
 #
 # Bootstrap layer: install Bun + Node + pnpm + gh CLI if missing,
 # fetch the Ink TUI (install-from-source.tsx), and hand off to it.
