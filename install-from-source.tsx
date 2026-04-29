@@ -1388,7 +1388,11 @@ function cleanupWorkdir(log: (lvl: LogEntry['level'], msg: string) => void) {
 async function captureCommand(cmd: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     let out = '';
-    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    // Same shell:true gate as execStream — Windows needs PATHEXT
+    // resolution for .cmd shims (pnpm, bun, gh, etc.). The args
+    // captureCommand is called with are all internal constants.
+    const useShell = process.platform === 'win32';
+    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], shell: useShell });
     child.stdout?.on('data', (d) => (out += d.toString()));
     child.stderr?.on('data', (d) => (out += d.toString()));
     child.on('exit', (code) => (code === 0 ? resolve(out) : reject(new Error(`${cmd} exited ${code}`))));
@@ -1415,10 +1419,20 @@ async function execStream(
 ): Promise<void> {
   log('cmd', `$ ${cmd} ${args.join(' ')}${opts.cwd ? ` (in ${opts.cwd})` : ''}`);
   return new Promise((resolve, reject) => {
+    // Windows: tools like `pnpm`, `bun`, `gh`, `npm`, `npx` are
+    // installed as `.cmd` shims on disk (corepack / winget put them
+    // there). Node's child_process.spawn() WITHOUT shell:true does
+    // not resolve PATHEXT, so it fails with `ENOENT: ... uv_spawn 'pnpm'`
+    // even when `pnpm` is on PATH. Reported by user on a fresh
+    // Windows install. Use shell:true on win32 for native commands
+    // — args here are all our own string constants so there's no
+    // shell-metachar injection vector to worry about.
+    const useShell = process.platform === 'win32';
     const child = spawn(cmd, args, {
       cwd: opts.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: process.env,
+      shell: useShell,
     });
     // Don't truncate stderr — the actual error message (pnpm install
     // failed because of … / npm registry 502 / etc.) is the whole
