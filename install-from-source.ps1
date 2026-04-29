@@ -190,8 +190,20 @@ Set-Content -Path (Join-Path $Work 'package.json') -Value $pkgJson -Encoding UTF
 
 Push-Location $Work
 try {
-  bun install --no-progress 2>&1 | Out-Null
-  if ($LASTEXITCODE -ne 0) { Die "Failed to install Ink deps in $Work" }
+  # PowerShell's $ErrorActionPreference='Stop' treats ANY native stderr
+  # write as a NativeCommandError and aborts — bun emits "Resolving
+  # dependencies" to stderr as routine progress, which trips that.
+  # Locally drop to 'Continue' for the duration of the install + use
+  # $LASTEXITCODE for the actual success check. Reported by user on
+  # Windows fresh install ("bun : Resolving dependencies … RemoteException").
+  $prevPref = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    & bun install --no-progress 2>&1 | Out-Null
+  } finally {
+    $ErrorActionPreference = $prevPref
+  }
+  if ($LASTEXITCODE -ne 0) { Die "Failed to install Ink deps in $Work (exit $LASTEXITCODE)" }
 } finally {
   Pop-Location
 }
